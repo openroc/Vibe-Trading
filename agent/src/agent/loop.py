@@ -393,6 +393,17 @@ class AgentLoop:
                     tools=self.registry.get_definitions(),
                     on_text_chunk=_on_text_chunk,
                 )
+                usage = getattr(response, "usage_metadata", None) or {}
+                if usage:
+                    self._emit(
+                        "llm_usage",
+                        {
+                            "input_tokens": int(usage.get("input_tokens") or 0),
+                            "output_tokens": int(usage.get("output_tokens") or 0),
+                            "total_tokens": int(usage.get("total_tokens") or 0),
+                            "iter": iteration,
+                        },
+                    )
 
                 thinking_text = "".join(thinking_chunks)
                 if thinking_text:

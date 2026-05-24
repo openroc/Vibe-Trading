@@ -784,6 +784,9 @@ class _RunDashboard:
         return Panel(body, title="Vibe-Trading", border_style="cyan", padding=(1, 1 if compact else 2))
 
 
+from cli.ui.rail import RailRunDashboard as _RunDashboard  # noqa: E402,F811
+
+
 # ---------------------------------------------------------------------------
 # Agent execution core
 # ---------------------------------------------------------------------------
@@ -1241,6 +1244,7 @@ def cmd_run(prompt: str, max_iter: int, *, json_mode: bool = False, no_rich: boo
             with Live(dashboard.render(), console=console, refresh_per_second=6, transient=True) as live:
                 dashboard.live = live
                 result = _run_agent(prompt, max_iter=max_iter, dashboard=dashboard)
+                dashboard.finish(result, time.perf_counter() - start)
     except KeyboardInterrupt:
         if json_mode:
             _print_json_result({"status": "cancelled", "run_id": None, "run_dir": None, "reason": "Interrupted"})
@@ -1334,6 +1338,7 @@ def cmd_continue(
                 max_iter=max_iter,
                 dashboard=dashboard,
             )
+            dashboard.finish(result, time.perf_counter() - start)
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted[/yellow]")
         return EXIT_RUN_FAILED
@@ -1727,6 +1732,7 @@ def cmd_interactive(max_iter: int) -> None:
             with Live(dashboard.render(), console=console, refresh_per_second=6, transient=True) as live:
                 dashboard.live = live
                 result = _run_agent(user_input, history=history[-6:], max_iter=max_iter, dashboard=dashboard)
+                dashboard.finish(result, time.perf_counter() - start)
         except KeyboardInterrupt:
             console.print("\n[yellow]Interrupted[/yellow]")
             continue
@@ -3118,6 +3124,10 @@ def main(argv: list[str] | None = None) -> int:
         args = parser.parse_args(raw_argv)
     except SystemExit as exc:
         return int(exc.code) if isinstance(exc.code, int) else EXIT_USAGE_ERROR
+    if not sys.stdout.isatty():
+        args.no_rich = True
+        if hasattr(args, "run_no_rich"):
+            args.run_no_rich = True
 
     if args.command == "init":
         return cmd_init()

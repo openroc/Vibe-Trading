@@ -235,6 +235,8 @@ class InteractiveContext:
             agent for follow-up context.
         max_iter: ReAct iteration ceiling.
         debug: Whether the ``/debug`` panel is currently shown.
+        last_recap_history_len: Number of history messages covered by the
+            most recently printed deterministic recap.
         pending_prompt: Optional prompt queued by a slash handler
             (``/journal``, ``/shadow``) that the loop should execute as
             the next user turn. Consumed by :func:`_interactive_loop`
@@ -245,6 +247,7 @@ class InteractiveContext:
     history: List[Dict[str, str]] = field(default_factory=list)
     max_iter: int = 50
     debug: bool = False
+    last_recap_history_len: int = 0
     pending_prompt: Optional[str] = None
 
 
@@ -575,7 +578,7 @@ def _run_one_turn(user_input: str, ctx: InteractiveContext) -> None:
     persistent memory, and the ReAct engine remain untouched — we only
     swap in the Rich dashboard and persist the turn to ``SessionStore``.
     """
-    from cli._legacy import _RunDashboard, _print_result, _run_agent
+    from cli._legacy import _RunDashboard, _run_agent
     from rich.live import Live
 
     console = get_console()
@@ -602,7 +605,9 @@ def _run_one_turn(user_input: str, ctx: InteractiveContext) -> None:
                 max_iter=ctx.max_iter,
                 dashboard=dashboard,
             )
+            dashboard.finish(result, time.perf_counter() - start)
     except (KeyboardInterrupt, BrokenPipeError):
+        dashboard.close()
         # BrokenPipe: caller did ``vibe-trading chat | head`` and the
         # downstream pipe closed mid-render. Print may itself fail on
         # the closed fd, so swallow that defensively too.
@@ -613,7 +618,7 @@ def _run_one_turn(user_input: str, ctx: InteractiveContext) -> None:
         return
 
     elapsed = time.perf_counter() - start
-    _print_result(result, elapsed)
+    _print_interactive_result(console, result, elapsed)
 
     ctx.history.append({"role": "user", "content": user_input})
     answer = (result.get("content") or "").strip()
@@ -623,6 +628,35 @@ def _run_one_turn(user_input: str, ctx: InteractiveContext) -> None:
 
     if ctx.debug:
         _print_debug_summary(console, result, elapsed, ctx)
+
+
+def _print_interactive_result(console: Any, result: Dict[str, Any], elapsed: float) -> None:
+    """Print the assistant answer after the rail without boxed run panels."""
+
+    from cli.ui.transcript import render_answer, render_elapsed_status
+
+    content = (result.get("content") or "").strip()
+    if content:
+        console.print(render_answer(content))
+        console.print()
+    console.print(render_elapsed_status(elapsed))
+    run_id = result.get("run_id")
+    if run_id:
+        console.print(f"[dim]/show {run_id} · {elapsed:.1f}s[/dim]")
+
+
+def _print_recap_if_needed(console: Any, ctx: InteractiveContext) -> None:
+    """Print a dim recap once per completed turn."""
+
+    if len(ctx.history) <= ctx.last_recap_history_len:
+        return
+    from cli.ui.transcript import render_recap
+
+    recap = render_recap(ctx.history)
+    if recap is not None:
+        console.print()
+        console.print(recap)
+    ctx.last_recap_history_len = len(ctx.history)
 
 
 def _print_input_hint(console: Any, hint: str) -> None:
@@ -640,8 +674,9 @@ def _interactive_loop(max_iter: int) -> int:
     """
     console = get_console()
 
-    # Warm up the preflight in a background thread so the wait is hidden.
-    _start_preflight_async()
+    # Keep the first prompt frame uncontested. The preflight renderer writes to
+    # stdout, so running it here races prompt_toolkit on cold start and can make
+    # the prompt appear only after the user presses Enter.
 
     ctx = InteractiveContext(max_iter=max_iter)
 
@@ -656,7 +691,7 @@ def _interactive_loop(max_iter: int) -> int:
 
     # Build the prompt session once so history + completer persist.
     try:
-        from cli.input import ctrl_c_within_window, make_session
+        from cli.input import ctrl_c_within_window, get_user_input, make_session
     except Exception as exc:  # noqa: BLE001 — fall back gracefully if prompt_toolkit broken
         console.print(f"[red]Failed to initialise input layer: {exc}[/red]")
         console.print("[dim]Falling back to legacy interactive loop.[/dim]")
@@ -669,11 +704,11 @@ def _interactive_loop(max_iter: int) -> int:
         return 0
 
     session = make_session()
-    _print_input_hint(console, "↑/↓ history · / for commands · Esc-Enter newline")
 
     while True:
+        _print_recap_if_needed(console, ctx)
         try:
-            user_input = session.prompt("> ")
+            user_input = get_user_input(session=session)
         except KeyboardInterrupt:
             # Should not reach here — the keybinding raises EOFError instead.
             continue
