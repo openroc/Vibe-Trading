@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState, useMemo, useCallback, type FormEvent } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Send, Loader2, ArrowDown, Square, Download, Plus, Paperclip, X, Users } from "lucide-react";
+import { Send, Loader2, ArrowDown, Square, Download, Plus, Paperclip, X, Users, Target, ChevronDown } from "lucide-react";
 import { toast } from "sonner";
 import { useAgentStore } from "@/stores/agent";
 import { useSSE } from "@/hooks/useSSE";
-import { useI18n } from "@/lib/i18n";
-import { api } from "@/lib/api";
+import { ApiError, api, type GoalSnapshot } from "@/lib/api";
+import { isReportWorthyRun } from "@/lib/runReports";
 import type { AgentMessage, ToolCallEntry } from "@/types/agent";
 import { AgentAvatar } from "@/components/chat/AgentAvatar";
 import { WelcomeScreen } from "@/components/chat/WelcomeScreen";
@@ -37,6 +37,47 @@ function groupMessages(msgs: AgentMessage[]): MsgGroup[] {
 
 const act = () => useAgentStore.getState();
 
+function isCriterionStatusMet(status: string): boolean {
+  return !["", "pending", "open", "unsatisfied"].includes(status.toLowerCase());
+}
+
+function getGoalProgress(snapshot: GoalSnapshot | null): {
+  met: number;
+  total: number;
+  label: string;
+  metLabel: string;
+  evidenceTotal: number;
+} {
+  const total = snapshot?.criteria.length ?? 0;
+  const met = snapshot?.criteria.filter((item) => isCriterionStatusMet(item.status)).length ?? 0;
+  const evidenceTotal = snapshot?.evidence_count ?? 0;
+  return {
+    met,
+    total,
+    label: total > 0 ? `${met}/${total}` : "",
+    metLabel: total > 0 ? `${met}/${total} met` : "",
+    evidenceTotal,
+  };
+}
+
+function statusLabel(status: string): string {
+  return status.replace(/_/g, " ");
+}
+
+function criterionIndexLabel(index: number): string {
+  return String(index + 1);
+}
+
+function criterionEvidenceCount(snapshot: GoalSnapshot, criterionId: string): number {
+  return snapshot.evidence.filter((item) => item.criterion_id === criterionId).length;
+}
+
+function latestGoalEvidence(snapshot: GoalSnapshot) {
+  return [...snapshot.evidence]
+    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+    .slice(0, 2);
+}
+
 /* ---------- Component ---------- */
 export function Agent() {
   const [input, setInput] = useState("");
@@ -46,6 +87,7 @@ export function Agent() {
   const sseSessionRef = useRef<string | null>(null);
   const prevSseStatusRef = useRef<string>("disconnected");
   const genRef = useRef(0);
+  const pendingGoalSessionRef = useRef<string | null>(null);
   const [showScrollBtn, setShowScrollBtn] = useState(false);
   const lastEventRef = useRef(0);
 
@@ -59,6 +101,9 @@ export function Agent() {
   const uploadMenuRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [swarmPreset, setSwarmPreset] = useState<{ name: string; title: string } | null>(null);
+  const [goalComposerActive, setGoalComposerActive] = useState(false);
+  const [goalDetailsOpen, setGoalDetailsOpen] = useState(false);
+  const [goalSnapshot, setGoalSnapshot] = useState<GoalSnapshot | null>(null);
 
   const messages = useAgentStore(s => s.messages);
   const streamingText = useAgentStore(s => s.streamingText);
@@ -68,7 +113,6 @@ export function Agent() {
   const sessionLoading = useAgentStore(s => s.sessionLoading);
 
   const { connect, disconnect, onStatusChange } = useSSE();
-  const { t } = useI18n();
 
   const urlSessionId = searchParams.get("session");
 
@@ -112,16 +156,38 @@ export function Agent() {
   useEffect(() => {
     onStatusChange((s) => {
       act().setSseStatus(s);
-      if (s === "reconnecting" && prevSseStatusRef.current === "connected") toast.warning(t.reconnecting);
-      else if (s === "connected" && prevSseStatusRef.current === "reconnecting") toast.success(t.connected);
+      if (s === "reconnecting" && prevSseStatusRef.current === "connected") toast.warning("Connection lost, reconnecting…");
+      else if (s === "connected" && prevSseStatusRef.current === "reconnecting") toast.success("Connection restored");
       prevSseStatusRef.current = s;
     });
-  }, [onStatusChange, t]);
+  }, [onStatusChange]);
 
   const doDisconnect = useCallback(() => {
     disconnect();
     sseSessionRef.current = null;
   }, [disconnect]);
+
+  const loadGoalSnapshot = useCallback(async (sid?: string | null) => {
+    const targetSession = sid || act().sessionId;
+    if (!targetSession) {
+      setGoalSnapshot(null);
+      setGoalDetailsOpen(false);
+      return;
+    }
+    try {
+      const snapshot = await api.getGoal(targetSession);
+      if (act().sessionId !== targetSession) return;
+      setGoalSnapshot(snapshot);
+    } catch (error) {
+      if (act().sessionId !== targetSession) return;
+      if (error instanceof ApiError && error.status === 404) {
+        setGoalSnapshot(null);
+        setGoalDetailsOpen(false);
+      } else {
+        toast.error(error instanceof Error ? error.message : "Failed to load goal.");
+      }
+    }
+  }, []);
 
   const loadSessionMessages = useCallback(async (sid: string, gen: number) => {
     try {
@@ -140,7 +206,24 @@ export function Agent() {
           if (m.content && m.content !== "Strategy execution completed.") {
             agentMsgs.push({ id: m.message_id + "_ans", type: "answer", content: m.content, timestamp: ts });
           }
-          agentMsgs.push({ id: m.message_id, type: "run_complete", content: "", runId, metrics, timestamp: ts + 1 });
+          if (metrics && Object.keys(metrics).length > 0) {
+            agentMsgs.push({ id: m.message_id, type: "run_complete", content: "", runId, metrics, timestamp: ts + 1 });
+          } else {
+            try {
+              const runData = await api.getRun(runId);
+              if (isReportWorthyRun(runData)) {
+                agentMsgs.push({
+                  id: m.message_id,
+                  type: "run_complete",
+                  content: "",
+                  runId,
+                  metrics: runData.metrics,
+                  equityCurve: runData.equity_curve?.map((e) => ({ time: e.time, equity: e.equity })),
+                  timestamp: ts + 1,
+                });
+              }
+            } catch { /* ignore non-report attempt directories */ }
+          }
         } else {
           agentMsgs.push({ id: m.message_id, type: "answer", content: m.content, timestamp: ts });
         }
@@ -162,7 +245,7 @@ export function Agent() {
 
     const touch = () => { lastEventRef.current = Date.now(); };
 
-    connect(api.sseUrl(sid), {
+    connect(api.sseUrl(sid, { replay: "active" }), {
       text_delta: (d) => { touch(); act().appendDelta(String(d.delta || "")); scrollToBottom(); },
       thinking_done: () => { touch(); /* don't flush — keep streaming text visible */ },
 
@@ -262,11 +345,11 @@ export function Agent() {
         if (runId) {
           try {
             const runData = await api.getRun(runId);
-            const hasMetrics = runData.metrics && Object.keys(runData.metrics).length > 0;
-            if (hasMetrics || shadowId) {
+            const hasReport = isReportWorthyRun(runData);
+            if (hasReport || shadowId) {
               s.addMessage({
                 id: "", type: "run_complete", content: "", runId,
-                metrics: hasMetrics ? runData.metrics : undefined,
+                metrics: hasReport ? runData.metrics : undefined,
                 equityCurve: runData.equity_curve?.map(e => ({ time: e.time, equity: e.equity })),
                 shadowId,
                 timestamp: Date.now(),
@@ -294,16 +377,27 @@ export function Agent() {
         scrollToBottom();
       },
 
+      "goal.created": () => {
+        touch();
+        loadGoalSnapshot(sid);
+      },
+
+      "goal.evidence": () => {
+        touch();
+        loadGoalSnapshot(sid);
+      },
+
       heartbeat: () => {},
       reconnect: (d) => { act().setSseStatus("reconnecting", Number(d.attempt ?? 0)); },
     });
-  }, [connect, disconnect, scrollToBottom]);
+  }, [connect, disconnect, loadGoalSnapshot, scrollToBottom]);
 
   useEffect(() => {
-    const gen = ++genRef.current;
     const { sessionId: curSid, messages: curMsgs, cacheSession, reset, getCachedSession, switchSession } = act();
 
     if (urlSessionId && urlSessionId !== curSid) {
+      const gen = genRef.current + 1;
+      genRef.current = gen;
       doDisconnect();
       if (curSid && curMsgs.length > 0) cacheSession(curSid, curMsgs);
 
@@ -317,11 +411,25 @@ export function Agent() {
       }
       setupSSE(urlSessionId);
     } else if (!urlSessionId && curSid) {
+      genRef.current += 1;
       doDisconnect();
-      if (curMsgs.length > 0) cacheSession(curSid, curMsgs);
+      if (curSid && curMsgs.length > 0) cacheSession(curSid, curMsgs);
       reset();
     }
   }, [urlSessionId, doDisconnect, loadSessionMessages, setupSSE, forceScrollToBottom]);
+
+  useEffect(() => {
+    if (!sessionId) {
+      setGoalSnapshot(null);
+      setGoalDetailsOpen(false);
+      return;
+    }
+    if (pendingGoalSessionRef.current === sessionId) {
+      pendingGoalSessionRef.current = null;
+      return;
+    }
+    loadGoalSnapshot(sessionId);
+  }, [sessionId, loadGoalSnapshot]);
 
   useEffect(() => () => doDisconnect(), [doDisconnect]);
 
@@ -339,6 +447,22 @@ export function Agent() {
 
   const runPrompt = async (prompt: string) => {
     if (!prompt.trim() || status === "streaming") return;
+
+    if (goalComposerActive) {
+      setInput("");
+      inputRef.current?.focus();
+      try {
+        const sid = await ensureGoalSession(prompt);
+        const snapshot = await api.createGoal(sid, { objective: prompt });
+        setGoalSnapshot(snapshot);
+        setGoalComposerActive(false);
+        setGoalDetailsOpen(true);
+        toast.success("Research goal attached");
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Failed to start goal.");
+      }
+      return;
+    }
 
     let finalPrompt = prompt;
 
@@ -370,10 +494,22 @@ export function Agent() {
       await api.sendMessage(sid, finalPrompt);
     } catch {
       act().setStatus("error");
-      toast.error(t.sendFailed);
-      act().addMessage({ id: "", type: "error", content: t.sendFailed, timestamp: Date.now() });
+      toast.error("Failed to send message, please retry.");
+      act().addMessage({ id: "", type: "error", content: "Failed to send message, please retry.", timestamp: Date.now() });
     }
   };
+
+  const ensureGoalSession = useCallback(async (title: string): Promise<string> => {
+    let sid = act().sessionId;
+    if (sid) return sid;
+    const session = await api.createSession(title.slice(0, 50));
+    sid = session.session_id;
+    pendingGoalSessionRef.current = sid;
+    act().setSessionId(sid);
+    setSearchParams({ session: sid }, { replace: true });
+    setupSSE(sid);
+    return sid;
+  }, [setSearchParams, setupSSE]);
 
   const handleSubmit = (e: FormEvent) => { e.preventDefault(); runPrompt(input.trim()); };
 
@@ -480,6 +616,7 @@ export function Agent() {
   }, [showUploadMenu]);
 
   const groups = useMemo(() => groupMessages(messages), [messages]);
+  const goalProgress = useMemo(() => getGoalProgress(goalSnapshot), [goalSnapshot]);
 
   return (
     <div className="flex flex-col flex-1 min-w-0 overflow-hidden h-full">
@@ -575,6 +712,116 @@ export function Agent() {
               </span>
             </div>
           )}
+          {goalComposerActive && (
+            <div className="flex items-center gap-1">
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-primary/10 text-primary text-xs font-medium">
+                <Target className="h-3 w-3" />
+                New Research Goal
+                <button type="button" onClick={() => setGoalComposerActive(false)} className="hover:text-destructive transition-colors">
+                  <X className="h-3 w-3" />
+                </button>
+              </span>
+            </div>
+          )}
+          {goalSnapshot && !goalComposerActive && (
+            <div className="grid gap-2">
+              <button
+                type="button"
+                onClick={() => setGoalDetailsOpen((open) => !open)}
+                className="inline-flex max-w-full items-center gap-1.5 justify-self-start rounded-lg bg-primary/10 px-2.5 py-1 text-left text-xs font-medium text-primary transition-colors hover:bg-primary/15"
+                title={goalSnapshot.goal.objective}
+                aria-label="Active research goal"
+                aria-expanded={goalDetailsOpen}
+              >
+                <Target className="h-3 w-3 shrink-0" />
+                <span className="shrink-0">Goal</span>
+                <span className="truncate text-muted-foreground">
+                  {goalSnapshot.goal.ui_summary || goalSnapshot.goal.objective}
+                </span>
+                {goalProgress.metLabel && (
+                  <span className="shrink-0 font-mono text-[11px] text-emerald-600 dark:text-emerald-400">
+                    {goalProgress.metLabel}
+                  </span>
+                )}
+                {goalProgress.evidenceTotal > 0 && (
+                  <span className="shrink-0 rounded bg-background px-1 font-mono text-[10px] text-primary">
+                    {goalProgress.evidenceTotal} ev
+                  </span>
+                )}
+                <ChevronDown
+                  className={[
+                    "h-3 w-3 shrink-0 transition-transform",
+                    goalDetailsOpen ? "rotate-180" : "",
+                  ].join(" ")}
+                  aria-hidden="true"
+                />
+              </button>
+              {goalDetailsOpen && (
+                <div className="grid gap-3 rounded-xl border border-primary/20 bg-background/95 p-3 text-xs shadow-sm">
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="rounded-lg border bg-muted/20 p-2.5">
+                      <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                        Criteria
+                      </div>
+                      <div className="mt-1 font-mono text-base font-semibold text-foreground">
+                        {goalProgress.label || "0/0"}
+                      </div>
+                    </div>
+                    <div className="rounded-lg border bg-muted/20 p-2.5">
+                      <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                        Evidence
+                      </div>
+                      <div className="mt-1 font-mono text-base font-semibold text-foreground">
+                        {goalProgress.evidenceTotal}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="grid gap-1.5">
+                    {goalSnapshot.criteria.map((criterion, index) => {
+                      const evidenceCount = criterionEvidenceCount(goalSnapshot, criterion.criterion_id);
+                      return (
+                        <div
+                          key={criterion.criterion_id}
+                          className="grid grid-cols-[1.25rem_minmax(0,1fr)_auto] items-start gap-2 rounded-lg border bg-muted/20 p-2"
+                        >
+                          <span className="flex h-5 w-5 items-center justify-center rounded-full bg-muted text-[10px] text-muted-foreground">
+                            {criterionIndexLabel(index)}
+                          </span>
+                          <span className="min-w-0">
+                            <span className="block truncate font-medium text-foreground">{criterion.text}</span>
+                            <span className="block text-[11px] text-muted-foreground">
+                              {statusLabel(criterion.status)}
+                            </span>
+                          </span>
+                          <span className="rounded-full border px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+                            {evidenceCount} ev
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  {goalSnapshot.evidence.length > 0 && (
+                    <div className="grid gap-1.5 border-t pt-2">
+                      <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                        Recent Evidence
+                      </div>
+                      {latestGoalEvidence(goalSnapshot).map((item) => (
+                        <div key={item.evidence_id} className="rounded-lg bg-muted/20 px-2 py-1.5">
+                          <div className="mb-0.5 flex items-center justify-between gap-2 text-[10px] text-muted-foreground">
+                            <span className="truncate">{item.source_provider || "evidence"}</span>
+                            <span>{statusLabel(item.verification_status)}</span>
+                          </div>
+                          <div className="line-clamp-2 text-[11px] leading-relaxed text-foreground">
+                            {item.text}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
           {/* Attachment badge */}
           {attachment && (
             <div className="flex items-center gap-1">
@@ -621,6 +868,20 @@ export function Agent() {
                     type="button"
                     onClick={() => {
                       setShowUploadMenu(false);
+                      setSwarmPreset(null);
+                      setGoalComposerActive(true);
+                      inputRef.current?.focus();
+                    }}
+                    className="w-full px-3 py-2 text-left text-sm hover:bg-muted transition-colors flex items-center gap-2"
+                  >
+                    <Target className="h-4 w-4" />
+                    Research Goal
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowUploadMenu(false);
+                      setGoalComposerActive(false);
                       setSwarmPreset({ name: "auto", title: "Agent Swarm" });
                       inputRef.current?.focus();
                     }}
@@ -655,7 +916,11 @@ export function Agent() {
                   runPrompt(input.trim());
                 }
               }}
-              placeholder={t.prompt}
+              placeholder={
+                goalComposerActive
+                  ? "Describe the research goal to attach to this session"
+                  : "e.g. Create a dual MA crossover strategy for 000001.SZ, backtest 2024"
+              }
               className="flex-1 px-4 py-2.5 rounded-xl border bg-background text-sm focus:outline-none focus:ring-2 focus:ring-primary/40 transition-shadow resize-none max-h-32 overflow-y-auto"
               disabled={status === "streaming"}
             />
@@ -681,7 +946,7 @@ export function Agent() {
             ) : (
               <button
                 type="submit"
-                disabled={!input.trim() && !attachment}
+                disabled={goalComposerActive ? !input.trim() : (!input.trim() && !attachment)}
                 className="px-4 py-2.5 rounded-xl bg-primary text-primary-foreground text-sm font-medium disabled:opacity-40 hover:opacity-90 transition-opacity"
               >
                 <Send className="h-4 w-4" />

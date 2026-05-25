@@ -53,6 +53,7 @@ logger = logging.getLogger(__name__)
 
 _skills_loader = None
 _registry = None
+_goal_store = None
 _include_shell_tools = True
 
 
@@ -77,6 +78,62 @@ def _get_registry():
 
         _registry = build_registry(include_shell_tools=_include_shell_tools)
     return _registry
+
+
+def _get_goal_store():
+    """Return the shared finance goal store."""
+    global _goal_store
+    if _goal_store is None:
+        from src.goal import GoalStore
+
+        _goal_store = GoalStore()
+    return _goal_store
+
+
+def _json_ok(**payload: Any) -> str:
+    """Return a standard MCP JSON success envelope."""
+    return json.dumps({"status": "ok", **payload}, ensure_ascii=False, indent=2)
+
+
+def _json_error(error: str, *, error_type: str = "error") -> str:
+    """Return a standard MCP JSON error envelope."""
+    return json.dumps(
+        {"status": "error", "error_type": error_type, "error": error},
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+def _default_goal_criteria() -> list[str]:
+    """Return the MVP finance protocol checklist."""
+    return [
+        "Define the research-only thesis and symbol universe",
+        "Collect fresh market or benchmark evidence",
+        "Record caveats, contradictions, and non-advice boundary",
+    ]
+
+
+def _clean_list(value: list[str] | None) -> list[str]:
+    """Strip empty list values from MCP payloads."""
+    return [item.strip() for item in (value or []) if item and item.strip()]
+
+
+def _blank_to_none(value: str | None) -> str | None:
+    """Normalize blank MCP strings to None."""
+    if value is None:
+        return None
+    value = value.strip()
+    return value or None
+
+
+def _risk_tier_from_text(value: str):
+    """Parse and validate goal risk tier."""
+    from src.goal import RiskTier
+
+    risk_tier = RiskTier(value)
+    if risk_tier is RiskTier.LIVE_TRADING_OR_EXECUTION:
+        raise ValueError("live trading or execution goals are not supported")
+    return risk_tier
 
 
 # ---------------------------------------------------------------------------
@@ -112,6 +169,171 @@ def load_skill(name: str) -> str:
     if content.startswith("Error:"):
         return json.dumps({"status": "error", "error": content}, ensure_ascii=False)
     return json.dumps({"status": "ok", "skill": name, "content": content}, ensure_ascii=False)
+
+
+# ---------------------------------------------------------------------------
+# Goal tools
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+def start_research_goal(
+    session_id: str,
+    objective: str,
+    criteria: list[str] | None = None,
+    ui_summary: str = "",
+    protocol: str = "thesis_review",
+    risk_tier: str = "research_general",
+    token_budget: int | None = None,
+    turn_budget: int | None = None,
+    time_budget_seconds: int | None = None,
+) -> str:
+    """Create or replace the current finance research goal for a session.
+
+    This is the MCP entry point for long-running, research-only finance tasks.
+    It creates an auditable goal with checklist criteria and supersedes any
+    previous current goal for the same session.
+
+    Args:
+        session_id: External conversation/session id owned by the MCP client.
+        objective: Research-only objective, not a trade execution request.
+        criteria: Optional checklist. Defaults to the MVP finance protocol.
+        ui_summary: Optional compact label for UI surfaces.
+        protocol: Research protocol name. Defaults to thesis_review.
+        risk_tier: One of the supported non-execution risk tiers.
+        token_budget: Optional token budget.
+        turn_budget: Optional turn budget.
+        time_budget_seconds: Optional wall-clock budget.
+    """
+    try:
+        clean_criteria = _clean_list(criteria) or _default_goal_criteria()
+        goal = _get_goal_store().replace_goal(
+            session_id=session_id.strip(),
+            objective=objective,
+            criteria=clean_criteria,
+            ui_summary=ui_summary,
+            source="mcp",
+            protocol=protocol,
+            risk_tier=_risk_tier_from_text(risk_tier),
+            token_budget=token_budget,
+            turn_budget=turn_budget,
+            time_budget_seconds=time_budget_seconds,
+        )
+        snapshot = _get_goal_store().get_goal_snapshot(goal.goal_id)
+        return _json_ok(snapshot=snapshot)
+    except ValueError as exc:
+        return _json_error(str(exc), error_type="validation")
+
+
+@mcp.tool
+def get_research_goal(session_id: str) -> str:
+    """Return the current finance research goal snapshot for a session.
+
+    Args:
+        session_id: External conversation/session id owned by the MCP client.
+    """
+    try:
+        snapshot = _get_goal_store().get_current_snapshot(session_id.strip())
+    except ValueError as exc:
+        return _json_error(str(exc), error_type="validation")
+    if snapshot is None:
+        return _json_error("No current goal", error_type="not_found")
+    return _json_ok(snapshot=snapshot)
+
+
+@mcp.tool
+def add_goal_evidence(
+    session_id: str,
+    goal_id: str,
+    expected_goal_id: str,
+    text: str,
+    criterion_id: str | None = None,
+    claim_id: str | None = None,
+    evidence_type: str = "evidence",
+    tool_call_id: str | None = None,
+    run_id: str | None = None,
+    source_provider: str | None = None,
+    source_type: str | None = None,
+    source_uri: str | None = None,
+    symbol_universe: list[str] | None = None,
+    benchmark: list[str] | None = None,
+    timeframe: str | None = None,
+    method: str | None = None,
+    assumptions: dict[str, Any] | None = None,
+    artifact_path: str | None = None,
+    artifact_hash: str | None = None,
+    data_as_of: str | None = None,
+    confidence: str | None = None,
+    caveat: str | None = None,
+    contradicts_claim_ids: list[str] | None = None,
+) -> str:
+    """Append traceable evidence to a finance research goal.
+
+    Args:
+        session_id: External conversation/session id.
+        goal_id: Goal being mutated.
+        expected_goal_id: Goal id captured before the tool/model turn started.
+        text: Evidence note or result summary.
+        criterion_id: Optional criterion this evidence satisfies.
+        claim_id: Optional claim this evidence supports or contradicts.
+        evidence_type: Evidence category, default evidence.
+        tool_call_id: Source tool call id. Presence marks evidence verified.
+        run_id: Vibe-Trading run id. Presence marks evidence verified.
+        source_provider: Data/provider name such as yfinance, OKX, tushare.
+        source_type: Source category such as market_data, document, backtest.
+        source_uri: Optional source URL/path.
+        symbol_universe: Symbols covered by the evidence.
+        benchmark: Benchmark symbols covered by the evidence.
+        timeframe: Market timeframe.
+        method: Research method used.
+        assumptions: Structured assumptions.
+        artifact_path: Artifact path. Presence marks evidence verified.
+        artifact_hash: Optional artifact hash.
+        data_as_of: ISO timestamp/date for data freshness.
+        confidence: Optional confidence label.
+        caveat: Optional limitation note.
+        contradicts_claim_ids: Claim ids contradicted by this evidence.
+    """
+    try:
+        from src.goal import EvidenceInput, StaleGoalError
+
+        evidence = _get_goal_store().append_evidence(
+            session_id=session_id.strip(),
+            goal_id=goal_id.strip(),
+            expected_goal_id=expected_goal_id.strip(),
+            evidence=EvidenceInput(
+                criterion_id=_blank_to_none(criterion_id),
+                claim_id=_blank_to_none(claim_id),
+                evidence_type=evidence_type,
+                text=text,
+                tool_call_id=_blank_to_none(tool_call_id),
+                run_id=_blank_to_none(run_id),
+                source_provider=_blank_to_none(source_provider),
+                source_type=_blank_to_none(source_type),
+                source_uri=_blank_to_none(source_uri),
+                symbol_universe=_clean_list(symbol_universe),
+                benchmark=_clean_list(benchmark),
+                timeframe=_blank_to_none(timeframe),
+                method=_blank_to_none(method),
+                assumptions=assumptions or {},
+                artifact_path=_blank_to_none(artifact_path),
+                artifact_hash=_blank_to_none(artifact_hash),
+                data_as_of=_blank_to_none(data_as_of),
+                confidence=_blank_to_none(confidence),
+                caveat=_blank_to_none(caveat),
+                contradicts_claim_ids=_clean_list(contradicts_claim_ids),
+            ),
+        )
+        snapshot = _get_goal_store().get_goal_snapshot(goal_id.strip())
+        if snapshot is None:
+            return _json_error("Goal snapshot could not be reloaded")
+        from dataclasses import asdict
+
+        return _json_ok(evidence=asdict(evidence), snapshot=snapshot)
+    except StaleGoalError as exc:
+        return _json_error(str(exc), error_type="stale_goal")
+    except ValueError as exc:
+        return _json_error(str(exc), error_type="validation")
 
 
 # ---------------------------------------------------------------------------

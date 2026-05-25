@@ -604,6 +604,7 @@ def _run_one_turn(user_input: str, ctx: InteractiveContext) -> None:
                 history=ctx.history[-_HISTORY_RETAINED_TURNS:],
                 max_iter=ctx.max_iter,
                 dashboard=dashboard,
+                session_id=ctx.session_id or "",
             )
             dashboard.finish(result, time.perf_counter() - start)
     except (KeyboardInterrupt, BrokenPipeError):

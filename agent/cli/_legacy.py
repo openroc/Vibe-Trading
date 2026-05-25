@@ -850,6 +850,7 @@ def _run_agent(
     no_rich: bool = False,
     stream_output: bool = True,
     dashboard: Optional[_RunDashboard] = None,
+    session_id: str = "",
 ) -> dict:
     """Build AgentLoop and execute, return result dict."""
     from src.tools import build_registry
@@ -975,6 +976,7 @@ def _run_agent(
             persistent_memory=pm,
             include_shell_tools=True,
             agent_config=agent_config,
+            session_id=session_id or None,
             warn_callback=_mcp_warn,
         ),
         llm=ChatLLM(),
@@ -985,7 +987,13 @@ def _run_agent(
     if run_dir_override:
         agent.memory.run_dir = run_dir_override
 
-    return _run_with_graceful_cancel(agent, prompt, history, no_rich=no_rich)
+    return _run_with_graceful_cancel(
+        agent,
+        prompt,
+        history,
+        no_rich=no_rich,
+        session_id=session_id,
+    )
 
 
 def _run_with_graceful_cancel(
@@ -994,6 +1002,7 @@ def _run_with_graceful_cancel(
     history: Optional[List[Dict]],
     *,
     no_rich: bool,
+    session_id: str = "",
 ) -> dict:
     """Run an agent loop with first-Ctrl+C = graceful cancel.
 
@@ -1020,7 +1029,7 @@ def _run_with_graceful_cancel(
         original = _signal.getsignal(_signal.SIGINT)
     except (ValueError, AttributeError):
         # Not on a thread that can receive signals — skip the handler swap.
-        return agent.run(user_message=prompt, history=history)
+        return agent.run(user_message=prompt, history=history, session_id=session_id)
 
     def _on_sigint(_signum, _frame) -> None:
         now = time.time()
@@ -1041,10 +1050,10 @@ def _run_with_graceful_cancel(
         _signal.signal(_signal.SIGINT, _on_sigint)
     except (ValueError, OSError):
         # signal.signal only works on the main thread of the main interpreter.
-        return agent.run(user_message=prompt, history=history)
+        return agent.run(user_message=prompt, history=history, session_id=session_id)
 
     try:
-        return agent.run(user_message=prompt, history=history)
+        return agent.run(user_message=prompt, history=history, session_id=session_id)
     finally:
         try:
             _signal.signal(_signal.SIGINT, original)

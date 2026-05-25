@@ -67,6 +67,8 @@ def build_registry(
     persistent_memory: "PersistentMemory | None" = None,
     include_shell_tools: bool = False,
     agent_config: "AgentConfig | None" = None,
+    session_id: str | None = None,
+    event_callback: Callable[[str, dict], None] | None = None,
     warn_callback: Callable[[str], None] | None = None,
 ) -> ToolRegistry:
     """Build the tool registry via auto-discovery, optionally enriched with MCP tools.
@@ -89,6 +91,10 @@ def build_registry(
             non-empty, MCP tools are appended to the registry after local
             tool discovery. Pass ``None`` (default) to preserve existing
             behavior with no MCP integration.
+        session_id: Optional current session id injected into local tools that
+            persist per-session state.
+        event_callback: Optional event callback injected into local tools that
+            mutate session-scoped state.
         warn_callback: Optional callable invoked with operator-facing warning
             messages. When provided, server-name collision warnings are passed
             to this callback in addition to the standard logger so CLI and
@@ -98,9 +104,11 @@ def build_registry(
         ToolRegistry containing all available local tools followed by any
         successfully discovered MCP tools.
     """
+    from src.tools.goal_tool import AddGoalEvidenceTool, GetResearchGoalTool, StartResearchGoalTool
     from src.tools.remember_tool import RememberTool
     from src.tools.swarm_tool import SwarmTool
 
+    goal_tool_classes = {StartResearchGoalTool, GetResearchGoalTool, AddGoalEvidenceTool}
     registry = ToolRegistry()
     for cls in _discover_subclasses():
         try:
@@ -112,6 +120,8 @@ def build_registry(
                 continue
             if cls is RememberTool and persistent_memory is not None:
                 registry.register(cls(memory=persistent_memory))
+            elif cls in goal_tool_classes:
+                registry.register(cls(default_session_id=session_id, event_callback=event_callback))
             elif cls is SwarmTool:
                 registry.register(cls(include_shell_tools=include_shell_tools))
             else:
