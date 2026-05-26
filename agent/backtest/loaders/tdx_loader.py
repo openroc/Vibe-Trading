@@ -13,6 +13,7 @@ TDX period values: ``1d`` (daily) | ``1w`` (weekly) | ``1mon`` (monthly) |
 
 from __future__ import annotations
 
+from datetime import timedelta
 import asyncio
 import json
 import logging
@@ -36,7 +37,7 @@ _TDX_HOSTS = os.getenv(
 
 TDX_PORTS = [int(p) for p in os.getenv("TDX_MCP_PORTS", "3100,3101").split(",")]
 
-TDX_TIMEOUT = int(os.getenv("TDX_MCP_TIMEOUT", "30"))
+TDX_TIMEOUT = int(os.getenv("TDX_MCP_TIMEOUT", "60"))
 
 # TDX only supports 1d / 1w / 1mon / 1y
 _PERIOD_MAP: Dict[str, str] = {
@@ -75,19 +76,14 @@ class DataLoader:
         except ImportError:
             logger.debug("mcp package not installed")
             return False
-
+        # 直接尝试完整连接
         for host in _TDX_HOSTS:
             for port in TDX_PORTS:
-                try:
-                    import httpx
-
-                    with httpx.Client(timeout=3.0) as client:
-                        resp = client.get(f"http://{host}:{port}/sse")
-                        if resp.status_code < 500:
-                            return True
-                except Exception:
-                    continue
-
+                if self._try_connect(host, port):
+                    self._cleanup()
+                    return True
+        logger.debug("No TDX MCP server reachable")
+        return False
         logger.debug("No TDX MCP server reachable")
         return False
 
@@ -124,7 +120,7 @@ class DataLoader:
                     f"http://{host}:{port}/sse", timeout=TDX_TIMEOUT
                 )
                 read_stream, write_stream = await streams.__aenter__()
-                session = ClientSession(read_stream, write_stream)
+                session = ClientSession(read_stream, write_stream, timedelta(seconds=TDX_TIMEOUT))
                 await session.__aenter__()
                 await session.initialize()
                 return streams, session
@@ -350,6 +346,7 @@ class DataLoader:
         lows = _arr("Low")
         closes = _arr("Close")
         volumes = _arr("Volume")
+        amounts = _arr("Amount")
 
         if not dates:
             return None
@@ -365,6 +362,7 @@ class DataLoader:
                     float(lows[i]) if i < len(lows) else 0.0,
                     float(closes[i]) if i < len(closes) else 0.0,
                     float(volumes[i]) if i < len(volumes) else 0.0,
+                    float(amounts[i]) if amounts and i < len(amounts) else 0.0,
                 ])
             except (ValueError, TypeError, IndexError):
                 continue
@@ -373,15 +371,15 @@ class DataLoader:
             return None
 
         df = pd.DataFrame(
-            rows, columns=["trade_date", "open", "high", "low", "close", "volume"]
+            rows, columns=["trade_date", "open", "high", "low", "close", "volume", "amount"]
         )
         df["trade_date"] = pd.to_datetime(df["trade_date"], format="%Y%m%d")
         df = df.set_index("trade_date").sort_index()
 
-        for col in ["open", "high", "low", "close", "volume"]:
+        for col in ["open", "high", "low", "close", "volume", "amount"]:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
-        ohlcv = df[["open", "high", "low", "close", "volume"]].dropna(
+        ohlcv = df[["open", "high", "low", "close", "volume", "amount"]].dropna(
             subset=["open", "high", "low", "close"]
         )
         return ohlcv if not ohlcv.empty else None

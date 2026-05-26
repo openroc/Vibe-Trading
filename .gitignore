@@ -92,6 +92,9 @@ AGENTS.md
 wiki/alpha-library/manifest.json
 wiki/alpha-library/content/
 
+# lock file
+*.lock
+
 # User Data
 userdata/
 reports/

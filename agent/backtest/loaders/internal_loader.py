@@ -101,7 +101,7 @@ class DataLoader:
 
     def __init__(self) -> None:
         import httpx
-        self._http = httpx.Client(timeout=10.0)
+        self._http = httpx.Client(timeout=30.0)
 
     def __del__(self) -> None:
         self._http.close()
@@ -177,7 +177,7 @@ class DataLoader:
         url = f"{_KLINE_BASE}/today1d/{market}.{sym}.csv"
 
         try:
-            r = self._http.get(url, timeout=10.0)
+            r = self._http.get(url, timeout=30.0)
         except Exception as exc:
             raise NoAvailableSourceError(f"cannot connect to {_KLINE_BASE}: {exc}") from exc
 
@@ -186,7 +186,7 @@ class DataLoader:
             # Fall back to histday (不复权)
             url = f"{_KLINE_BASE}/histday/{market}.{sym}.csv"
             try:
-                r = self._http.get(url, timeout=10.0)
+                r = self._http.get(url, timeout=30.0)
             except Exception as exc:
                 raise NoAvailableSourceError(f"cannot connect to {_KLINE_BASE}: {exc}") from exc
             csv_text = r.text
@@ -198,8 +198,8 @@ class DataLoader:
         if not csv_text.strip():
             return None
 
-        # Both today1d and histday always have a header row with these 7 columns
-        # (histday has extra trailing columns we ignore).
+        # today1d CSV 列名: datetime,open,close,high,low,vol,amount
+        # 重命名为标准列名
         col_names = ["trade_date", "open", "close", "high", "low", "volume", "amount"]
 
         df = pd.read_csv(
