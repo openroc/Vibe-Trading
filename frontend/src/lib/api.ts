@@ -90,9 +90,19 @@ export const api = {
       body: JSON.stringify(body),
     }),
   getGoal: (sid: string) => request<GoalSnapshot>(`/sessions/${sid}/goal`),
+  updateGoal: (sid: string, body: UpdateGoalRequest) =>
+    request<UpdateGoalResponse>(`/sessions/${sid}/goal`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
   addGoalEvidence: (sid: string, body: AddGoalEvidenceRequest) =>
     request<AddGoalEvidenceResponse>(`/sessions/${sid}/goal/evidence`, {
       method: "POST",
+      body: JSON.stringify(body),
+    }),
+  updateGoalStatus: (sid: string, body: UpdateGoalStatusRequest) =>
+    request<UpdateGoalStatusResponse>(`/sessions/${sid}/goal/status`, {
+      method: "PATCH",
       body: JSON.stringify(body),
     }),
   sseUrl: (sid: string, options?: { replay?: "active" }) => {
@@ -530,8 +540,40 @@ export interface AddGoalEvidenceRequest {
   contradicts_claim_ids?: string[];
 }
 
+export interface UpdateGoalRequest {
+  goal_id: string;
+  expected_goal_id: string;
+  objective?: string;
+  ui_summary?: string;
+}
+
+export interface UpdateGoalResponse {
+  goal: GoalRecord;
+  snapshot: GoalSnapshot;
+}
+
 export interface AddGoalEvidenceResponse {
   evidence: GoalEvidence;
+  snapshot: GoalSnapshot;
+}
+
+export interface GoalAuditRowRequest {
+  criterion_id: string;
+  result: string;
+  evidence_ids?: string[];
+  notes?: string;
+}
+
+export interface UpdateGoalStatusRequest {
+  goal_id: string;
+  expected_goal_id: string;
+  status: GoalStatus;
+  audit?: GoalAuditRowRequest[];
+  recap?: string | null;
+}
+
+export interface UpdateGoalStatusResponse {
+  goal: GoalRecord;
   snapshot: GoalSnapshot;
 }
 

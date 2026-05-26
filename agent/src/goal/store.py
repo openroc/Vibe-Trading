@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import threading
 import uuid
@@ -30,6 +31,7 @@ from src.goal.policy import normalize_required_text, reject_live_execution_objec
 from src.tools.path_utils import safe_document_path, safe_run_id
 
 _DEFAULT_DB_PATH = Path.home() / ".vibe-trading" / "sessions.db"
+_DB_PATH_ENV = "VIBE_TRADING_GOAL_DB_PATH"
 
 _CURRENT_STATUSES = {
     GoalStatus.ACTIVE,
@@ -66,6 +68,14 @@ def _json_loads(value: str | None, default: object) -> object:
     return json.loads(value)
 
 
+def _default_db_path() -> Path:
+    """Return the configured goal ledger database path."""
+    raw_path = os.getenv(_DB_PATH_ENV, "").strip()
+    if raw_path:
+        return Path(raw_path).expanduser()
+    return _DEFAULT_DB_PATH
+
+
 def _to_json_dict(value: object) -> dict:
     data = asdict(value)
     for key, item in list(data.items()):
@@ -91,13 +101,14 @@ def _synchronized(method: F) -> F:
 class GoalStore:
     """SQLite-backed store for finance research goals."""
 
-    def __init__(self, db_path: Path = _DEFAULT_DB_PATH) -> None:
+    def __init__(self, db_path: Path | None = None) -> None:
         """Initialize the goal store.
 
         Args:
-            db_path: SQLite database path.
+            db_path: SQLite database path. When omitted,
+                ``VIBE_TRADING_GOAL_DB_PATH`` can override the default.
         """
-        self.db_path = Path(db_path)
+        self.db_path = Path(db_path) if db_path is not None else _default_db_path()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
@@ -371,6 +382,71 @@ class GoalStore:
         return goal
 
     @_synchronized
+    def update_goal(
+        self,
+        *,
+        session_id: str,
+        goal_id: str,
+        expected_goal_id: str,
+        objective: str | None = None,
+        ui_summary: str | None = None,
+    ) -> GoalRecord:
+        """Edit mutable goal metadata without superseding the active goal.
+
+        Args:
+            session_id: Owning session id.
+            goal_id: Goal being mutated.
+            expected_goal_id: Stale-write guard captured by the caller.
+            objective: Optional replacement research objective.
+            ui_summary: Optional compact display summary.
+
+        Returns:
+            Updated goal record.
+
+        Raises:
+            StaleGoalError: If the goal is stale or not current.
+            ValueError: If the new objective is empty or unsafe.
+        """
+        with self._write_transaction():
+            goal = self._require_mutable_goal(session_id, goal_id, expected_goal_id)
+            session_id = goal.session_id
+            goal_id = goal.goal_id
+            next_objective = goal.objective
+            if objective is not None:
+                next_objective = normalize_required_text(objective, "goal objective")
+                reject_live_execution_objective(next_objective)
+            next_summary = goal.ui_summary
+            if ui_summary is not None:
+                next_summary = ui_summary.strip() or next_objective[:80]
+            elif objective is not None and goal.ui_summary == goal.objective[:80]:
+                next_summary = next_objective[:80]
+            now = _now_iso()
+            self._conn.execute(
+                """
+                UPDATE goals
+                SET objective = ?, ui_summary = ?, updated_at = ?
+                WHERE goal_id = ? AND session_id = ?
+                """,
+                (next_objective, next_summary, now, goal_id, session_id),
+            )
+            if objective is not None:
+                self._conn.execute(
+                    """
+                    UPDATE goal_claims
+                    SET text = ?, updated_at = ?
+                    WHERE goal_id = ? AND session_id = ?
+                        AND claim_type = 'thesis'
+                        AND status = 'active'
+                    """,
+                    (next_objective, now, goal_id, session_id),
+                )
+
+        updated = self.get_goal(goal_id)
+        if updated is None:
+            raise RuntimeError("updated goal could not be reloaded")
+        return updated
+
+    @_synchronized
     def get_goal(self, goal_id: str) -> GoalRecord | None:
         """Return a goal by id."""
         row = self._conn.execute(
@@ -600,6 +676,16 @@ class GoalStore:
                     now,
                 ),
             )
+            if evidence.criterion_id is not None:
+                self._conn.execute(
+                    """
+                    UPDATE goal_criteria
+                    SET status = 'covered', updated_at = ?
+                    WHERE goal_id = ? AND session_id = ? AND criterion_id = ?
+                        AND status IN ('pending', 'open', 'unsatisfied')
+                    """,
+                    (now, goal_id, session_id, evidence.criterion_id),
+                )
 
         record = self._get_evidence(evidence_id)
         if record is None:
@@ -824,6 +910,7 @@ class GoalStore:
                 raise ValueError("complete goals require verified evidence")
             if row.result == "not_applicable_user_accepted" and not row.notes.strip():
                 raise ValueError("not-applicable criteria require acceptance notes")
+            has_verified_evidence = False
             for evidence_id in row.evidence_ids:
                 evidence = self._get_evidence(evidence_id)
                 if evidence is None or evidence.goal_id != goal.goal_id:
@@ -832,8 +919,10 @@ class GoalStore:
                     raise ValueError(
                         f"evidence {evidence_id} does not match criterion {criterion.criterion_id}"
                     )
-                if evidence.verification_status != "verified":
-                    raise ValueError("complete goals require verified evidence")
+                if evidence.verification_status == "verified":
+                    has_verified_evidence = True
+            if row.result in {"satisfied", "satisfied_with_caveat"} and not has_verified_evidence:
+                raise ValueError("complete goals require verified evidence")
 
     def _get_evidence(self, evidence_id: str) -> EvidenceRecord | None:
         row = self._conn.execute(

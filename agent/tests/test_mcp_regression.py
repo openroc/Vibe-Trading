@@ -163,6 +163,7 @@ def test_mcp_server_exposes_well_known_tool_names() -> None:
         "start_research_goal",
         "get_research_goal",
         "add_goal_evidence",
+        "update_research_goal_status",
     }
     missing = expected - registered
     assert not missing, (

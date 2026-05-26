@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
 from rich.console import Console
 
+from src.goal.context import default_goal_criteria
 from src.ui_services import build_run_analysis, load_run_context
 
 # UTF-8 on Windows
@@ -251,6 +252,15 @@ class CreateGoalRequest(BaseModel):
     time_budget_seconds: Optional[int] = Field(None, ge=1)
 
 
+class UpdateGoalRequest(BaseModel):
+    """Edit mutable finance research goal fields."""
+
+    goal_id: str = Field(..., min_length=1)
+    expected_goal_id: str = Field(..., min_length=1)
+    objective: Optional[str] = Field(None, min_length=1, max_length=5000)
+    ui_summary: Optional[str] = Field(None, max_length=500)
+
+
 class AddGoalEvidenceRequest(BaseModel):
     """Append evidence to a finance research goal."""
 
@@ -292,6 +302,39 @@ class AddGoalEvidenceResponse(BaseModel):
     """Response after appending goal evidence."""
 
     evidence: Dict[str, Any]
+    snapshot: GoalSnapshotResponse
+
+
+class GoalAuditRowRequest(BaseModel):
+    """One criterion row for goal status audits."""
+
+    criterion_id: str = Field(..., min_length=1)
+    result: str = Field(..., min_length=1)
+    evidence_ids: List[str] = Field(default_factory=list)
+    notes: str = ""
+
+
+class UpdateGoalStatusRequest(BaseModel):
+    """Update a finance research goal status."""
+
+    goal_id: str = Field(..., min_length=1)
+    expected_goal_id: str = Field(..., min_length=1)
+    status: str = Field(..., min_length=1)
+    audit: List[GoalAuditRowRequest] = Field(default_factory=list)
+    recap: Optional[str] = None
+
+
+class UpdateGoalStatusResponse(BaseModel):
+    """Response after changing a goal status."""
+
+    goal: Dict[str, Any]
+    snapshot: GoalSnapshotResponse
+
+
+class UpdateGoalResponse(BaseModel):
+    """Response after editing a goal."""
+
+    goal: Dict[str, Any]
     snapshot: GoalSnapshotResponse
 
 
@@ -1502,7 +1545,7 @@ async def create_session_goal(session_id: str, req: CreateGoalRequest):
 
     criteria = [item.strip() for item in req.criteria if item.strip()]
     if not criteria:
-        criteria = ["Define research thesis", "Record at least one supporting or contradicting evidence row"]
+        criteria = default_goal_criteria()
     try:
         risk_tier = RiskTier(req.risk_tier)
     except ValueError as exc:
@@ -1546,6 +1589,41 @@ async def get_session_goal(session_id: str):
     if snapshot is None:
         raise HTTPException(status_code=404, detail="No current goal")
     return snapshot
+
+
+@app.patch(
+    "/sessions/{session_id}/goal",
+    response_model=UpdateGoalResponse,
+    dependencies=[Depends(require_auth)],
+)
+async def update_session_goal(session_id: str, req: UpdateGoalRequest):
+    """Edit the current finance research goal without replacing the session."""
+    _validate_path_param(session_id, "session_id")
+    svc, _session = _get_existing_session_or_404(session_id)
+    from src.goal import StaleGoalError
+
+    if req.objective is None and req.ui_summary is None:
+        raise HTTPException(status_code=400, detail="objective or ui_summary is required")
+
+    goal_store = _get_goal_store()
+    try:
+        goal = goal_store.update_goal(
+            session_id=session_id,
+            goal_id=req.goal_id,
+            expected_goal_id=req.expected_goal_id,
+            objective=req.objective,
+            ui_summary=req.ui_summary,
+        )
+    except StaleGoalError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    snapshot = goal_store.get_goal_snapshot(goal.goal_id)
+    if snapshot is None:
+        raise HTTPException(status_code=500, detail="Goal snapshot could not be reloaded")
+    svc.event_bus.emit(session_id, "goal.updated", {"goal": snapshot["goal"], "snapshot": snapshot})
+    return {"goal": snapshot["goal"], "snapshot": snapshot}
 
 
 @app.post(
@@ -1604,6 +1682,52 @@ async def add_session_goal_evidence(session_id: str, req: AddGoalEvidenceRequest
         {"evidence": asdict(evidence), "goal_id": req.goal_id},
     )
     return {"evidence": asdict(evidence), "snapshot": snapshot}
+
+
+@app.patch(
+    "/sessions/{session_id}/goal/status",
+    response_model=UpdateGoalStatusResponse,
+    dependencies=[Depends(require_auth)],
+)
+async def update_session_goal_status(session_id: str, req: UpdateGoalStatusRequest):
+    """Update the current finance research goal status."""
+    _validate_path_param(session_id, "session_id")
+    svc, _session = _get_existing_session_or_404(session_id)
+    from src.goal import AuditRow, GoalStatus, StaleGoalError
+
+    try:
+        next_status = GoalStatus(req.status)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"invalid goal status: {req.status}") from exc
+
+    goal_store = _get_goal_store()
+    try:
+        goal = goal_store.update_status(
+            session_id=session_id,
+            goal_id=req.goal_id,
+            expected_goal_id=req.expected_goal_id,
+            status=next_status,
+            audit=[
+                AuditRow(
+                    criterion_id=row.criterion_id,
+                    result=row.result,
+                    evidence_ids=row.evidence_ids,
+                    notes=row.notes,
+                )
+                for row in req.audit
+            ],
+            recap=req.recap,
+        )
+    except StaleGoalError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    snapshot = goal_store.get_goal_snapshot(goal.goal_id)
+    if snapshot is None:
+        raise HTTPException(status_code=500, detail="Goal snapshot could not be reloaded")
+    svc.event_bus.emit(session_id, "goal.updated", {"goal": snapshot["goal"], "snapshot": snapshot})
+    return {"goal": snapshot["goal"], "snapshot": snapshot}
 
 
 @app.delete("/sessions/{session_id}", dependencies=[Depends(require_auth)])

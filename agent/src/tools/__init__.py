@@ -104,11 +104,21 @@ def build_registry(
         ToolRegistry containing all available local tools followed by any
         successfully discovered MCP tools.
     """
-    from src.tools.goal_tool import AddGoalEvidenceTool, GetResearchGoalTool, StartResearchGoalTool
+    from src.tools.goal_tool import (
+        AddGoalEvidenceTool,
+        GetResearchGoalTool,
+        StartResearchGoalTool,
+        UpdateResearchGoalStatusTool,
+    )
     from src.tools.remember_tool import RememberTool
     from src.tools.swarm_tool import SwarmTool
 
-    goal_tool_classes = {StartResearchGoalTool, GetResearchGoalTool, AddGoalEvidenceTool}
+    goal_tool_classes = {
+        StartResearchGoalTool,
+        GetResearchGoalTool,
+        AddGoalEvidenceTool,
+        UpdateResearchGoalStatusTool,
+    }
     registry = ToolRegistry()
     for cls in _discover_subclasses():
         try:

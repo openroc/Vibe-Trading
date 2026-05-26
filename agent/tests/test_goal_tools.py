@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from src.tools.goal_tool import (
     AddGoalEvidenceTool,
     GetResearchGoalTool,
     StartResearchGoalTool,
+    UpdateResearchGoalStatusTool,
 )
 
 
@@ -115,6 +117,77 @@ def test_goal_tools_emit_mutation_events(tmp_path: Path) -> None:
     assert [item[0] for item in events] == ["goal.created", "goal.evidence"]
     assert events[0][1]["goal"]["session_id"] == "session-1"
     assert events[1][1]["goal_id"] == created["snapshot"]["goal"]["goal_id"]
+
+
+def test_goal_evidence_tool_binds_runtime_artifact(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Runtime run_dir artifacts become verified goal evidence automatically."""
+    run_root = tmp_path / "runs"
+    run_dir = run_root / "goal-tool-run"
+    artifact = run_dir / "artifacts" / "metrics.csv"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text("symbol,return\nNVDA,0.12\n", encoding="utf-8")
+    monkeypatch.setenv("VIBE_TRADING_ALLOWED_RUN_ROOTS", str(run_root))
+    monkeypatch.setenv("VIBE_TRADING_ALLOWED_FILE_ROOTS", str(run_root))
+
+    store = GoalStore(tmp_path / "goals.db")
+    start = StartResearchGoalTool(default_session_id="session-1", store=store)
+    add = AddGoalEvidenceTool(default_session_id="session-1", store=store)
+    created = json.loads(
+        start.execute(
+            objective="Evaluate NVDA momentum as a research-only thesis.",
+            criteria=["Check price action"],
+        )
+    )
+
+    result = json.loads(
+        add.execute(
+            goal_id=created["snapshot"]["goal"]["goal_id"],
+            criterion_index=1,
+            text="Generated metrics artifact for NVDA momentum.",
+            source_provider="pytest",
+            source_type="market_data",
+            artifact_path="artifacts/metrics.csv",
+            run_dir=str(run_dir),
+        )
+    )
+
+    expected_hash = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    evidence = result["evidence"]
+    assert result["status"] == "ok"
+    assert evidence["run_id"] == "goal-tool-run"
+    assert evidence["artifact_path"] == str(artifact.resolve())
+    assert evidence["artifact_hash"] == expected_hash
+    assert evidence["verification_status"] == "verified"
+
+
+def test_goal_status_tool_can_cancel_current_goal(tmp_path: Path) -> None:
+    """Agent tools can move a current goal to a terminal status."""
+    store = GoalStore(tmp_path / "goals.db")
+    start = StartResearchGoalTool(default_session_id="session-1", store=store)
+    update = UpdateResearchGoalStatusTool(default_session_id="session-1", store=store)
+    created = json.loads(
+        start.execute(
+            objective="Evaluate NVDA momentum as a research-only thesis.",
+            criteria=["Define thesis"],
+        )
+    )
+    goal_id = created["snapshot"]["goal"]["goal_id"]
+
+    result = json.loads(
+        update.execute(
+            goal_id=goal_id,
+            expected_goal_id=goal_id,
+            status="cancelled",
+            recap="Cancelled during tool test.",
+        )
+    )
+
+    assert result["status"] == "ok"
+    assert result["snapshot"]["goal"]["status"] == "cancelled"
+    assert store.get_current_snapshot("session-1") is None
 
 
 def test_registry_injects_goal_event_callback() -> None:

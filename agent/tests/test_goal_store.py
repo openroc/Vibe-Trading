@@ -67,6 +67,29 @@ def test_replace_goal_creates_initial_thesis_claim(tmp_path: Path) -> None:
     assert claims[0].status == "active"
 
 
+def test_update_goal_edits_current_objective_without_replacing_goal(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    goal = store.replace_goal(
+        session_id="session-1",
+        objective="Evaluate NVDA momentum.",
+        criteria=["Define thesis"],
+    )
+
+    updated = store.update_goal(
+        session_id="session-1",
+        goal_id=goal.goal_id,
+        expected_goal_id=goal.goal_id,
+        objective="Evaluate NVDA versus QQQ momentum.",
+    )
+
+    assert updated.goal_id == goal.goal_id
+    assert updated.objective == "Evaluate NVDA versus QQQ momentum."
+    current = store.get_current_goal("session-1")
+    assert current is not None
+    assert current.goal_id == goal.goal_id
+    assert store.list_claims(goal.goal_id)[0].text == "Evaluate NVDA versus QQQ momentum."
+
+
 def test_replace_goal_rejects_live_execution_objective(tmp_path: Path) -> None:
     store = _store(tmp_path)
 
@@ -332,6 +355,62 @@ def test_complete_goal_with_verified_evidence(tmp_path: Path, monkeypatch: pytes
     assert store.list_criteria(goal.goal_id)[0].status == "satisfied"
 
 
+def test_completion_allows_mixed_verified_and_historical_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Audit rows may cite old evidence as long as each criterion has verified evidence."""
+    store = _store(tmp_path)
+    monkeypatch.setenv("VIBE_TRADING_ALLOWED_FILE_ROOTS", str(tmp_path))
+    goal = store.replace_goal(
+        session_id="session-1",
+        objective="Evaluate NVDA momentum.",
+        criteria=["Check price action"],
+    )
+    criterion = store.list_criteria(goal.goal_id)[0]
+    old_evidence = store.append_evidence(
+        session_id="session-1",
+        goal_id=goal.goal_id,
+        expected_goal_id=goal.goal_id,
+        evidence=EvidenceInput(
+            criterion_id=criterion.criterion_id,
+            text="Historical unverified note from an earlier model turn.",
+        ),
+    )
+    artifact = tmp_path / "nvda_momentum.txt"
+    artifact.write_text("Verified NVDA momentum artifact.", encoding="utf-8")
+    verified_evidence = store.append_evidence(
+        session_id="session-1",
+        goal_id=goal.goal_id,
+        expected_goal_id=goal.goal_id,
+        evidence=EvidenceInput(
+            criterion_id=criterion.criterion_id,
+            text="Verified artifact evidence for the same criterion.",
+            artifact_path=str(artifact),
+            artifact_hash=_sha256(artifact),
+        ),
+    )
+
+    completed = store.update_status(
+        session_id="session-1",
+        goal_id=goal.goal_id,
+        expected_goal_id=goal.goal_id,
+        status=GoalStatus.COMPLETE,
+        audit=[
+            AuditRow(
+                criterion_id=criterion.criterion_id,
+                result="satisfied",
+                evidence_ids=[old_evidence.evidence_id, verified_evidence.evidence_id],
+                notes="Historical note plus current verified evidence.",
+            )
+        ],
+    )
+
+    assert old_evidence.verification_status == "unverified"
+    assert verified_evidence.verification_status == "verified"
+    assert completed.status is GoalStatus.COMPLETE
+
+
 def test_artifact_evidence_requires_allowed_path_and_hash(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -424,6 +503,28 @@ def test_goal_snapshot_includes_claims_criteria_and_evidence(tmp_path: Path) -> 
     assert snapshot["criteria"][0]["criterion_id"] == criterion.criterion_id
     assert snapshot["evidence"][0]["evidence_id"] == evidence.evidence_id
     assert snapshot["evidence_count"] == 1
+
+
+def test_append_evidence_marks_linked_pending_criterion_covered(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    goal = store.replace_goal(
+        session_id="session-1",
+        objective="Evaluate NVDA momentum.",
+        criteria=["Check price action"],
+    )
+    criterion = store.list_criteria(goal.goal_id)[0]
+
+    store.append_evidence(
+        session_id="session-1",
+        goal_id=goal.goal_id,
+        expected_goal_id=goal.goal_id,
+        evidence=EvidenceInput(
+            criterion_id=criterion.criterion_id,
+            text="NVDA outperformed QQQ over the last 5 sessions.",
+        ),
+    )
+
+    assert store.list_criteria(goal.goal_id)[0].status == "covered"
 
 
 def test_goal_snapshot_caps_evidence_but_reports_total_count(tmp_path: Path) -> None:

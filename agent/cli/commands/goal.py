@@ -13,6 +13,7 @@ from rich.table import Table
 from rich.text import Text
 
 from cli.theme import get_console
+from src.goal.context import default_goal_criteria
 
 _goal_store = None
 
@@ -34,11 +35,7 @@ def _get_goal_store():
 
 def _default_criteria() -> list[str]:
     """Return the MVP finance protocol checklist."""
-    return [
-        "Define the research-only thesis and symbol universe",
-        "Collect fresh market or benchmark evidence",
-        "Record caveats, contradictions, and non-advice boundary",
-    ]
+    return default_goal_criteria()
 
 
 def _criterion_is_covered(criterion: dict, evidence: list[dict]) -> bool:
@@ -263,6 +260,98 @@ def cmd_evidence(ctx: Any = None, *args: str) -> int:
     return 0
 
 
+def cmd_cancel(ctx: Any = None, *args: str) -> int:
+    """Cancel the current research goal."""
+    session_id = _session_id(ctx, create=False)
+    if session_id is None:
+        _resolve_console().print(Text("No current goal. Use /goal <objective> first.", style="dim"))
+        return 0
+    snapshot = _get_goal_store().get_current_snapshot(session_id)
+    if snapshot is None:
+        _resolve_console().print(Text("No current goal. Use /goal <objective> first.", style="dim"))
+        return 0
+
+    recap = " ".join(args).strip() or "Cancelled from CLI."
+    try:
+        from src.goal import GoalStatus
+
+        updated = _get_goal_store().update_status(
+            session_id=session_id,
+            goal_id=snapshot["goal"]["goal_id"],
+            expected_goal_id=snapshot["goal"]["goal_id"],
+            status=GoalStatus.CANCELLED,
+            recap=recap,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _resolve_console().print(Text(f"/goal cancel failed: {exc}", style="bold red"))
+        return 1
+
+    terminal_snapshot = _get_goal_store().get_goal_snapshot(updated.goal_id)
+    if terminal_snapshot is not None:
+        _render_snapshot(terminal_snapshot, title="/goal cancelled")
+    return 0
+
+
+def cmd_complete(ctx: Any = None, *args: str) -> int:  # noqa: ARG001
+    """Complete the current research goal after auditing verified evidence."""
+    session_id = _session_id(ctx, create=False)
+    if session_id is None:
+        _resolve_console().print(Text("No current goal. Use /goal <objective> first.", style="dim"))
+        return 0
+    snapshot = _get_goal_store().get_current_snapshot(session_id)
+    if snapshot is None:
+        _resolve_console().print(Text("No current goal. Use /goal <objective> first.", style="dim"))
+        return 0
+
+    evidence = snapshot.get("evidence") or []
+    audit_rows = []
+    for criterion in snapshot.get("criteria") or []:
+        criterion_evidence = [
+            item
+            for item in evidence
+            if item.get("criterion_id") == criterion["criterion_id"]
+            and item.get("verification_status") == "verified"
+        ]
+        if not criterion_evidence:
+            _resolve_console().print(
+                Text(
+                    "Cannot complete: every criterion needs verified run/artifact evidence.",
+                    style="bold red",
+                )
+            )
+            return 1
+        from src.goal import AuditRow
+
+        audit_rows.append(
+            AuditRow(
+                criterion_id=criterion["criterion_id"],
+                result="satisfied",
+                evidence_ids=[item["evidence_id"] for item in criterion_evidence],
+                notes="Verified evidence attached from CLI audit.",
+            )
+        )
+
+    try:
+        from src.goal import GoalStatus
+
+        updated = _get_goal_store().update_status(
+            session_id=session_id,
+            goal_id=snapshot["goal"]["goal_id"],
+            expected_goal_id=snapshot["goal"]["goal_id"],
+            status=GoalStatus.COMPLETE,
+            audit=audit_rows,
+            recap=" ".join(args).strip() or "Completed from CLI audit.",
+        )
+    except Exception as exc:  # noqa: BLE001
+        _resolve_console().print(Text(f"/goal complete failed: {exc}", style="bold red"))
+        return 1
+
+    terminal_snapshot = _get_goal_store().get_goal_snapshot(updated.goal_id)
+    if terminal_snapshot is not None:
+        _render_snapshot(terminal_snapshot, title="/goal completed")
+    return 0
+
+
 def cmd_help() -> int:
     """Render /goal usage."""
     body = Text()
@@ -272,6 +361,10 @@ def cmd_help() -> int:
     body.append("  show the current goal snapshot\n", style="dim")
     body.append("/goal evidence <criterion-index-or-id> <note>", style="bold")
     body.append("  append manual evidence\n", style="dim")
+    body.append("/goal complete [recap]", style="bold")
+    body.append("  complete after verified evidence audit\n", style="dim")
+    body.append("/goal cancel [recap]", style="bold")
+    body.append("  cancel the current goal\n", style="dim")
     _resolve_console().print(Panel(body, title="/goal", border_style="dim", padding=(1, 2)))
     return 0
 
@@ -290,6 +383,10 @@ def run(ctx: Any = None, *args: str) -> int:
         return cmd_start(ctx, *args[1:])
     if command == "evidence":
         return cmd_evidence(ctx, *args[1:])
+    if command == "complete":
+        return cmd_complete(ctx, *args[1:])
+    if command in {"cancel", "cancelled"}:
+        return cmd_cancel(ctx, *args[1:])
     return cmd_start(ctx, *args)
 
 
@@ -298,4 +395,6 @@ __all__ = [
     "cmd_start",
     "cmd_status",
     "cmd_evidence",
+    "cmd_complete",
+    "cmd_cancel",
 ]

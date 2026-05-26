@@ -121,3 +121,26 @@ def test_goal_start_persists_session_id_on_plain_context(tmp_path: Path, monkeyp
     assert goal_cmd.run(ctx, "Evaluate", "NVDA", "momentum.") == 0
     assert ctx.session_id == "session-1"
     assert goal_cmd.run(ctx, "status") == 0
+
+
+def test_goal_cancel_moves_goal_out_of_current_set(tmp_path: Path, monkeypatch) -> None:
+    """CLI users can end an active goal without replacing it."""
+    from cli.commands import goal as goal_cmd
+
+    store = GoalStore(tmp_path / "goals.db")
+    monkeypatch.setattr(goal_cmd, "_goal_store", store)
+    goal = store.replace_goal(
+        session_id="session-1",
+        objective="Evaluate NVDA momentum.",
+        criteria=["Define thesis"],
+    )
+    ctx = SimpleNamespace(session_id="session-1")
+
+    rc = goal_cmd.run(ctx, "cancel", "No", "longer", "needed.")
+
+    assert rc == 0
+    assert store.get_current_snapshot("session-1") is None
+    cancelled = store.get_goal(goal.goal_id)
+    assert cancelled is not None
+    assert cancelled.status.value == "cancelled"
+    assert cancelled.recap == "No longer needed."

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useMemo, useCallback, type FormEvent } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Send, Loader2, ArrowDown, Square, Download, Plus, Paperclip, X, Users, Target, ChevronDown } from "lucide-react";
+import { Send, Loader2, ArrowDown, Square, Download, Plus, Paperclip, X, Users, Target, ChevronDown, Pencil, Check, Play } from "lucide-react";
 import { toast } from "sonner";
 import { useAgentStore } from "@/stores/agent";
 import { useSSE } from "@/hooks/useSSE";
@@ -49,7 +49,7 @@ function getGoalProgress(snapshot: GoalSnapshot | null): {
   evidenceTotal: number;
 } {
   const total = snapshot?.criteria.length ?? 0;
-  const met = snapshot?.criteria.filter((item) => isCriterionStatusMet(item.status)).length ?? 0;
+  const met = snapshot?.criteria.filter((item) => criterionCovered(snapshot, item)).length ?? 0;
   const evidenceTotal = snapshot?.evidence_count ?? 0;
   return {
     met,
@@ -64,6 +64,10 @@ function statusLabel(status: string): string {
   return status.replace(/_/g, " ");
 }
 
+function isTerminalGoalStatus(status: string): boolean {
+  return ["complete", "cancelled", "blocked", "superseded", "usage_limited"].includes(status);
+}
+
 function criterionIndexLabel(index: number): string {
   return String(index + 1);
 }
@@ -72,10 +76,37 @@ function criterionEvidenceCount(snapshot: GoalSnapshot, criterionId: string): nu
   return snapshot.evidence.filter((item) => item.criterion_id === criterionId).length;
 }
 
+function criterionCovered(snapshot: GoalSnapshot, criterion: GoalSnapshot["criteria"][number]): boolean {
+  return isCriterionStatusMet(criterion.status) || criterionEvidenceCount(snapshot, criterion.criterion_id) > 0;
+}
+
 function latestGoalEvidence(snapshot: GoalSnapshot) {
   return [...snapshot.evidence]
     .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
     .slice(0, 2);
+}
+
+function goalKickoffPrompt(objective: string): string {
+  return [
+    "Start working on this research goal now.",
+    "Keep it research-only, use available tools when evidence is needed, add concrete evidence to the goal ledger, and keep going until the goal is complete, blocked, waiting for user input, or budget-limited.",
+    "",
+    `Goal: ${objective}`,
+  ].join("\n");
+}
+
+function goalContinuePrompt(snapshot: GoalSnapshot): string {
+  const openCriteria = snapshot.criteria
+    .filter((item) => item.required && !criterionCovered(snapshot, item))
+    .map((item) => `- ${item.text}`)
+    .join("\n");
+  return [
+    "Continue the active research goal.",
+    "Use real available tools as needed, add evidence to the goal ledger, and only stop when the goal is complete, blocked, waiting for user input, or budget-limited.",
+    "",
+    `Goal: ${snapshot.goal.objective}`,
+    openCriteria ? `Open criteria:\n${openCriteria}` : "All criteria appear covered; audit the ledger and update the goal status if completion is justified.",
+  ].join("\n");
 }
 
 /* ---------- Component ---------- */
@@ -104,6 +135,8 @@ export function Agent() {
   const [goalComposerActive, setGoalComposerActive] = useState(false);
   const [goalDetailsOpen, setGoalDetailsOpen] = useState(false);
   const [goalSnapshot, setGoalSnapshot] = useState<GoalSnapshot | null>(null);
+  const [goalEditActive, setGoalEditActive] = useState(false);
+  const [goalEditValue, setGoalEditValue] = useState("");
 
   const messages = useAgentStore(s => s.messages);
   const streamingText = useAgentStore(s => s.streamingText);
@@ -172,6 +205,7 @@ export function Agent() {
     if (!targetSession) {
       setGoalSnapshot(null);
       setGoalDetailsOpen(false);
+      setGoalEditActive(false);
       return;
     }
     try {
@@ -183,6 +217,7 @@ export function Agent() {
       if (error instanceof ApiError && error.status === 404) {
         setGoalSnapshot(null);
         setGoalDetailsOpen(false);
+        setGoalEditActive(false);
       } else {
         toast.error(error instanceof Error ? error.message : "Failed to load goal.");
       }
@@ -387,6 +422,23 @@ export function Agent() {
         loadGoalSnapshot(sid);
       },
 
+      "goal.updated": (d) => {
+        touch();
+        const snapshot = d.snapshot as GoalSnapshot | undefined;
+        const goal = (d.goal as GoalSnapshot["goal"] | undefined) ?? snapshot?.goal;
+        if (goal && isTerminalGoalStatus(goal.status)) {
+          setGoalSnapshot(null);
+          setGoalDetailsOpen(false);
+          setGoalEditActive(false);
+          return;
+        }
+        if (snapshot) {
+          setGoalSnapshot(snapshot);
+          return;
+        }
+        loadGoalSnapshot(sid);
+      },
+
       heartbeat: () => {},
       reconnect: (d) => { act().setSseStatus("reconnecting", Number(d.attempt ?? 0)); },
     });
@@ -458,7 +510,14 @@ export function Agent() {
         setGoalComposerActive(false);
         setGoalDetailsOpen(true);
         toast.success("Research goal attached");
+        const kickoff = goalKickoffPrompt(prompt);
+        act().addMessage({ id: "", type: "user", content: kickoff, timestamp: Date.now() });
+        act().setStatus("streaming");
+        forceScrollToBottom();
+        setupSSE(sid);
+        await api.sendMessage(sid, kickoff);
       } catch (error) {
+        act().setStatus("idle");
         toast.error(error instanceof Error ? error.message : "Failed to start goal.");
       }
       return;
@@ -528,6 +587,63 @@ export function Agent() {
       toast.error("Cancel failed");
     }
   };
+
+  const handleCancelGoal = useCallback(async () => {
+    if (!sessionId || !goalSnapshot) return;
+    try {
+      await api.updateGoalStatus(sessionId, {
+        goal_id: goalSnapshot.goal.goal_id,
+        expected_goal_id: goalSnapshot.goal.goal_id,
+        status: "cancelled",
+        recap: "Cancelled from Web UI.",
+      });
+      setGoalSnapshot(null);
+      setGoalDetailsOpen(false);
+      toast.success("Research goal cancelled");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to cancel goal.");
+    }
+  }, [goalSnapshot, sessionId]);
+
+  const handleStartGoalEdit = useCallback(() => {
+    if (!goalSnapshot) return;
+    setGoalEditValue(goalSnapshot.goal.objective);
+    setGoalEditActive(true);
+  }, [goalSnapshot]);
+
+  const handleSaveGoalEdit = useCallback(async () => {
+    const objective = goalEditValue.trim();
+    if (!sessionId || !goalSnapshot || !objective) return;
+    try {
+      const response = await api.updateGoal(sessionId, {
+        goal_id: goalSnapshot.goal.goal_id,
+        expected_goal_id: goalSnapshot.goal.goal_id,
+        objective,
+      });
+      setGoalSnapshot(response.snapshot);
+      setGoalEditActive(false);
+      toast.success("Research goal updated");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to update goal.");
+    }
+  }, [goalEditValue, goalSnapshot, sessionId]);
+
+  const handleContinueGoal = useCallback(async () => {
+    if (!sessionId || !goalSnapshot || status === "streaming") return;
+    const prompt = goalContinuePrompt(goalSnapshot);
+    act().addMessage({ id: "", type: "user", content: prompt, timestamp: Date.now() });
+    act().setStatus("streaming");
+    forceScrollToBottom();
+    inputRef.current?.focus();
+    try {
+      setupSSE(sessionId);
+      await api.sendMessage(sessionId, prompt);
+    } catch {
+      act().setStatus("error");
+      toast.error("Failed to continue goal, please retry.");
+      act().addMessage({ id: "", type: "error", content: "Failed to continue goal, please retry.", timestamp: Date.now() });
+    }
+  }, [forceScrollToBottom, goalSnapshot, sessionId, setupSSE, status]);
 
   const handleRetry = useCallback((errorMsg: AgentMessage) => {
     if (status === "streaming") return;
@@ -758,6 +874,39 @@ export function Agent() {
               </button>
               {goalDetailsOpen && (
                 <div className="grid gap-3 rounded-xl border border-primary/20 bg-background/95 p-3 text-xs shadow-sm">
+                  {goalEditActive ? (
+                    <div className="grid gap-2">
+                      <textarea
+                        value={goalEditValue}
+                        onChange={(event) => setGoalEditValue(event.target.value)}
+                        rows={3}
+                        className="w-full rounded-lg border bg-background px-3 py-2 text-xs leading-relaxed text-foreground outline-none focus:ring-2 focus:ring-primary/30"
+                      />
+                      <div className="flex justify-end gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setGoalEditActive(false)}
+                          className="inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground"
+                        >
+                          <X className="h-3 w-3" />
+                          Cancel
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleSaveGoalEdit}
+                          disabled={!goalEditValue.trim()}
+                          className="inline-flex items-center gap-1 rounded-lg bg-primary px-2 py-1 text-[11px] font-medium text-primary-foreground transition-opacity disabled:opacity-40"
+                        >
+                          <Check className="h-3 w-3" />
+                          Save
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="rounded-lg border bg-muted/20 px-3 py-2 text-[11px] leading-relaxed text-muted-foreground">
+                      {goalSnapshot.goal.objective}
+                    </div>
+                  )}
                   <div className="grid grid-cols-2 gap-2">
                     <div className="rounded-lg border bg-muted/20 p-2.5">
                       <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
@@ -779,6 +928,9 @@ export function Agent() {
                   <div className="grid gap-1.5">
                     {goalSnapshot.criteria.map((criterion, index) => {
                       const evidenceCount = criterionEvidenceCount(goalSnapshot, criterion.criterion_id);
+                      const displayStatus = criterionCovered(goalSnapshot, criterion) && !isCriterionStatusMet(criterion.status)
+                        ? "covered"
+                        : statusLabel(criterion.status);
                       return (
                         <div
                           key={criterion.criterion_id}
@@ -790,7 +942,7 @@ export function Agent() {
                           <span className="min-w-0">
                             <span className="block truncate font-medium text-foreground">{criterion.text}</span>
                             <span className="block text-[11px] text-muted-foreground">
-                              {statusLabel(criterion.status)}
+                              {displayStatus}
                             </span>
                           </span>
                           <span className="rounded-full border px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
@@ -818,6 +970,34 @@ export function Agent() {
                       ))}
                     </div>
                   )}
+                  <div className="flex flex-wrap justify-end gap-2 border-t pt-2">
+                    <button
+                      type="button"
+                      onClick={handleContinueGoal}
+                      disabled={status === "streaming"}
+                      className="inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground disabled:opacity-40"
+                    >
+                      <Play className="h-3 w-3" />
+                      Continue
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleStartGoalEdit}
+                      disabled={goalEditActive}
+                      className="inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground disabled:opacity-40"
+                    >
+                      <Pencil className="h-3 w-3" />
+                      Edit
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleCancelGoal}
+                      className="inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-[11px] font-medium text-muted-foreground transition-colors hover:border-destructive/40 hover:text-destructive"
+                    >
+                      <X className="h-3 w-3" />
+                      Cancel Goal
+                    </button>
+                  </div>
                 </div>
               )}
             </div>

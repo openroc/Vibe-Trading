@@ -106,11 +106,9 @@ def _json_error(error: str, *, error_type: str = "error") -> str:
 
 def _default_goal_criteria() -> list[str]:
     """Return the MVP finance protocol checklist."""
-    return [
-        "Define the research-only thesis and symbol universe",
-        "Collect fresh market or benchmark evidence",
-        "Record caveats, contradictions, and non-advice boundary",
-    ]
+    from src.goal.context import default_goal_criteria
+
+    return default_goal_criteria()
 
 
 def _clean_list(value: list[str] | None) -> list[str]:
@@ -124,6 +122,27 @@ def _blank_to_none(value: str | None) -> str | None:
         return None
     value = value.strip()
     return value or None
+
+
+def _audit_rows_from_payload(value: list[dict[str, Any]] | None):
+    """Parse MCP completion audit rows."""
+    from src.goal import AuditRow
+
+    rows = []
+    for item in value or []:
+        criterion_id = str(item.get("criterion_id") or "").strip()
+        result = str(item.get("result") or "").strip()
+        if not criterion_id or not result:
+            raise ValueError("audit rows require criterion_id and result")
+        rows.append(
+            AuditRow(
+                criterion_id=criterion_id,
+                result=result,
+                evidence_ids=_clean_list(item.get("evidence_ids") or []),
+                notes=str(item.get("notes") or ""),
+            )
+        )
+    return rows
 
 
 def _risk_tier_from_text(value: str):
@@ -277,8 +296,8 @@ def add_goal_evidence(
         criterion_id: Optional criterion this evidence satisfies.
         claim_id: Optional claim this evidence supports or contradicts.
         evidence_type: Evidence category, default evidence.
-        tool_call_id: Source tool call id. Presence marks evidence verified.
-        run_id: Vibe-Trading run id. Presence marks evidence verified.
+        tool_call_id: Source tool call id for traceability; it does not verify evidence by itself.
+        run_id: Vibe-Trading run id. It verifies evidence only when the run directory exists.
         source_provider: Data/provider name such as yfinance, OKX, tushare.
         source_type: Source category such as market_data, document, backtest.
         source_uri: Optional source URL/path.
@@ -287,8 +306,8 @@ def add_goal_evidence(
         timeframe: Market timeframe.
         method: Research method used.
         assumptions: Structured assumptions.
-        artifact_path: Artifact path. Presence marks evidence verified.
-        artifact_hash: Optional artifact hash.
+        artifact_path: Artifact path. It verifies evidence only when allowed by path policy and paired with a matching sha256 hash.
+        artifact_hash: Required sha256 when artifact_path should verify evidence.
         data_as_of: ISO timestamp/date for data freshness.
         confidence: Optional confidence label.
         caveat: Optional limitation note.
@@ -330,6 +349,50 @@ def add_goal_evidence(
         from dataclasses import asdict
 
         return _json_ok(evidence=asdict(evidence), snapshot=snapshot)
+    except StaleGoalError as exc:
+        return _json_error(str(exc), error_type="stale_goal")
+    except ValueError as exc:
+        return _json_error(str(exc), error_type="validation")
+
+
+@mcp.tool
+def update_research_goal_status(
+    session_id: str,
+    goal_id: str,
+    expected_goal_id: str,
+    status: str,
+    audit: list[dict[str, Any]] | None = None,
+    recap: str | None = None,
+) -> str:
+    """Update a finance research goal status after an audit.
+
+    Use this to complete, cancel, block, pause, or otherwise move the current
+    goal through its lifecycle. ``complete`` requires one audit row per
+    required criterion and verified evidence for satisfied rows.
+
+    Args:
+        session_id: External conversation/session id.
+        goal_id: Goal being mutated.
+        expected_goal_id: Goal id captured before the tool/model turn started.
+        status: Goal lifecycle status, e.g. complete, cancelled, blocked.
+        audit: Optional list of criterion audit rows.
+        recap: Optional concise status recap.
+    """
+    try:
+        from src.goal import GoalStatus, StaleGoalError
+
+        updated = _get_goal_store().update_status(
+            session_id=session_id.strip(),
+            goal_id=goal_id.strip(),
+            expected_goal_id=expected_goal_id.strip(),
+            status=GoalStatus(status),
+            audit=_audit_rows_from_payload(audit),
+            recap=_blank_to_none(recap),
+        )
+        snapshot = _get_goal_store().get_goal_snapshot(updated.goal_id)
+        if snapshot is None:
+            return _json_error("Goal snapshot could not be reloaded")
+        return _json_ok(goal=snapshot["goal"], snapshot=snapshot)
     except StaleGoalError as exc:
         return _json_error(str(exc), error_type="stale_goal")
     except ValueError as exc:

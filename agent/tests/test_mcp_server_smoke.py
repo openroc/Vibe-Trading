@@ -51,6 +51,7 @@ REQUIRED_TOOL_NAMES = {
     "start_research_goal",
     "get_research_goal",
     "add_goal_evidence",
+    "update_research_goal_status",
 }
 
 
