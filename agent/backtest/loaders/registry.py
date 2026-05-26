@@ -65,6 +65,7 @@ def _ensure_registered() -> None:
 
     _loader_modules = [
         "backtest.loaders.tushare",
+        "backtest.loaders.internal_loader",
         "backtest.loaders.okx",
         "backtest.loaders.yfinance_loader",
         "backtest.loaders.akshare_loader",
