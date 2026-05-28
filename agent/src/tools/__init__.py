@@ -13,6 +13,7 @@ from __future__ import annotations
 import importlib
 import logging
 import pkgutil
+from collections.abc import Mapping
 from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
@@ -70,6 +71,7 @@ def build_registry(
     session_id: str | None = None,
     event_callback: Callable[[str, dict], None] | None = None,
     warn_callback: Callable[[str], None] | None = None,
+    _mcp_server_tool_name_segments: Mapping[str, str] | None = None,
 ) -> ToolRegistry:
     """Build the tool registry via auto-discovery, optionally enriched with MCP tools.
 
@@ -142,10 +144,16 @@ def build_registry(
     if agent_config and agent_config.mcp_servers:
         from src.tools.mcp import build_mcp_tool_wrappers, resolve_mcp_server_tool_name_segments
 
-        local_server_names = resolve_mcp_server_tool_name_segments(
-            agent_config.mcp_servers.keys(),
-            warn_callback=warn_callback,
-        )
+        if _mcp_server_tool_name_segments is None:
+            local_server_names = resolve_mcp_server_tool_name_segments(
+                agent_config.mcp_servers.keys(),
+                warn_callback=warn_callback,
+            )
+        else:
+            local_server_names = {
+                server_name: _mcp_server_tool_name_segments[server_name]
+                for server_name in agent_config.mcp_servers
+            }
 
         for server_name, server_config in agent_config.mcp_servers.items():
             try:
@@ -173,10 +181,10 @@ def build_registry(
 def build_filtered_registry(tool_names: list[str], *, include_shell_tools: bool = False) -> ToolRegistry:
     """Build a ToolRegistry with only specified tools.
 
-    TODO(v1): Keep this path local-only for now. Swarm workers currently use
-    filtered registries, and v1 MCP support does not propagate agent_config
-    into swarm execution until a separate design pass defines how remote MCP
-    tools should be configured and constrained there.
+    Local-tools-only filtered builder. Swarm workers should call
+    :func:`build_swarm_registry` instead so they can opt into remote MCP
+    tools when the operator has configured them. This function is preserved
+    for callers that explicitly want the local-only path.
 
     Args:
         tool_names: Tool names to include.
@@ -186,6 +194,91 @@ def build_filtered_registry(tool_names: list[str], *, include_shell_tools: bool 
         ToolRegistry containing only the requested tools.
     """
     full = build_registry(include_shell_tools=include_shell_tools)
+    return _filter_registry(full, tool_names, include_shell_tools=include_shell_tools)
+
+
+def build_swarm_registry(
+    tool_names: list[str],
+    *,
+    agent_config: "AgentConfig | None" = None,
+    include_shell_tools: bool = False,
+) -> ToolRegistry:
+    """Build a per-worker registry that merges local + remote MCP tools.
+
+    Swarm workers receive a strict whitelist (``agent_spec.tools``). This
+    builder honors that whitelist while letting operator-configured MCP
+    servers contribute additional tools by name (``mcp_<server>_<tool>``).
+    Tools the whitelist requests but the operator has NOT surfaced — either
+    because ``agent_config`` is ``None``, the named MCP server is absent, or
+    the server's ``enabled_tools`` allowlist excluded it — are dropped with
+    an operator-facing warning instead of failing the worker.
+
+    Trust model: ``agent_config`` is resolved at server boot from a static
+    file or env var; callers of swarm entry points (e.g. an external MCP
+    client driving ``mcp_server.py::run_swarm``) cannot inject MCP server
+    URLs through this path.
+
+    Args:
+        tool_names: Per-agent tool whitelist from the preset.
+        agent_config: Optional resolved agent config. When provided, remote
+            MCP wrappers are appended to the candidate pool before filtering.
+            Pass ``None`` to keep the worker strictly local.
+        include_shell_tools: Whether shell-execution tools are eligible.
+
+    Returns:
+        ToolRegistry containing the whitelist intersection of local tools
+        and any operator-surfaced MCP tools.
+    """
+    swarm_agent_config, swarm_local_server_names = _prune_agent_config_for_swarm_tools(
+        agent_config,
+        tool_names,
+    )
+    full = build_registry(
+        agent_config=swarm_agent_config,
+        include_shell_tools=include_shell_tools,
+        _mcp_server_tool_name_segments=swarm_local_server_names,
+    )
+    return _filter_registry(full, tool_names, include_shell_tools=include_shell_tools)
+
+
+def _prune_agent_config_for_swarm_tools(
+    agent_config: "AgentConfig | None",
+    tool_names: list[str],
+) -> tuple["AgentConfig | None", dict[str, str] | None]:
+    """Keep only MCP servers whose local tool prefix appears in ``tool_names``."""
+    if not agent_config or not agent_config.mcp_servers:
+        return agent_config, None
+
+    requested_mcp_tool_names = [name for name in tool_names if name.startswith("mcp_")]
+    if not requested_mcp_tool_names:
+        return None, None
+
+    from src.config.schema import AgentConfig
+    from src.tools.mcp import resolve_mcp_server_tool_name_segments
+
+    local_server_names = resolve_mcp_server_tool_name_segments(agent_config.mcp_servers.keys())
+    selected_servers = {
+        server_name: server_config
+        for server_name, server_config in agent_config.mcp_servers.items()
+        if any(
+            tool_name.startswith(f"mcp_{local_server_names[server_name]}_")
+            for tool_name in requested_mcp_tool_names
+        )
+    }
+    selected_local_server_names = {
+        server_name: local_server_names[server_name]
+        for server_name in selected_servers
+    }
+    return AgentConfig(mcp_servers=selected_servers), selected_local_server_names
+
+
+def _filter_registry(
+    full: ToolRegistry,
+    tool_names: list[str],
+    *,
+    include_shell_tools: bool,
+) -> ToolRegistry:
+    """Project a full registry down to a whitelist with consistent drop logging."""
     filtered = ToolRegistry()
     for name in tool_names:
         tool = full.get(name)
@@ -201,4 +294,4 @@ def build_filtered_registry(tool_names: list[str], *, include_shell_tools: bool 
     return filtered
 
 
-__all__ = ["build_registry", "build_filtered_registry"]
+__all__ = ["build_registry", "build_filtered_registry", "build_swarm_registry"]
