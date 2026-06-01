@@ -46,11 +46,16 @@
 
 ## 📰 뉴스
 
+- **2026-06-01** 🚀 **v0.1.9 출시**(`pip install -U vibe-trading-ai`): 0.1.8 이후 모든 것을 롤업했습니다. Connector-first 브로커 profile(IBKR 로컬 읽기 전용 TWS / IB Gateway + OAuth·커밋된 mandate·order guard·audit ledger·instant halt 뒤의 Robinhood Agentic Trading). CLI / REST / MCP / Web을 아우르는 Research Goal 런타임. swarm 패스 — live reconcile + MCP keepalive, operator가 설정한 worker MCP 도구, 엄격 alpha-bench 랜덤 컨트롤, 실패/오래된 run을 다시 실행하는 새 `retry_run`(이제 **36개 MCP tools**). `agent/cli/` 패키지 리팩토링 + 새 터미널 UI, `mootdx` 무토큰 A주 loader, backtest / agent loop / session 견고성 패스. `--version`은 이제 항상 설치된 패키지와 일치하여 0.1.8 드리프트를 수정합니다([#156](https://github.com/HKUDS/Vibe-Trading/issues/156)).
+- **2026-05-31** 🔌 **Connector-first 브로커 아키텍처(IBKR + Robinhood)**: 거래 접근은 이제 별도의 브로커/live 진입점이 아니라 선택 가능한 connector profile에서 시작합니다. `vibe-trading connector list/use/check/account/positions/orders/quote/history`와 MCP `trading_*` 도구는 동일한 선택 profile을 공유하며, paper/live는 connector의 속성으로 다룹니다. IBKR은 로컬 읽기 전용 TWS / IB Gateway profile로 즉시 사용할 수 있고, 공식 IBKR 원격 MCP 경로는 안정적인 read tool 이름이 제공될 때까지 OAuth `mcp.read` probe로 seed되어 있습니다. Robinhood Agentic Trading은 계속 OAuth, 커밋된 mandate, order guard, audit ledger, instant halt 뒤에 있는 bounded live MCP connector입니다.
+- **2026-05-30** 🧰 **견고성 패스 — backtest, agent loop, session**: LLM이 생성한 signal engine은 이제 인스턴스화 전에 인터페이스 사전 검증을 거칩니다. 순환 self-import, 누락된 `generate()`, 기본값 없는 `__init__` 인자, 잘못된 반환 타입 같은 흔한 실수를 조기에 잡아 원시 traceback 대신 실행 가능한 JSON 오류로 반환합니다 ([#149](https://github.com/HKUDS/Vibe-Trading/pull/149)). 후속 작업으로 소스 수준 AST 검증 오류도 동일한 깔끔한 JSON 봉투에 실었습니다. agent loop는 더 이상 50회 반복을 모두 소진하고 출력 없는 `failed` 상태로 끝나지 않습니다 — swarm worker의 검증된 방식을 따라 반복 예산의 80%에서 wrap-up nudge를 주입하고 마지막 반복에서 tool 정의를 제거해 텍스트 답변을 강제합니다 ([#148](https://github.com/HKUDS/Vibe-Trading/pull/148)). 중간에만 발동하도록 가드되어 research-goal 컨텍스트를 밀어내지 않습니다. session 메시지 쓰기는 이제 append마다 `flush + fsync`하여 비싼 AI 응답이 쓰기 도중 크래시에도 살아남고, 읽기 경로는 손상된 JSONL 줄을 건너뛰며(복구용으로 앞 200자 로깅) `/messages` 엔드포인트 전체를 500으로 만들지 않습니다 ([#147](https://github.com/HKUDS/Vibe-Trading/pull/147)). Web 입력창은 IME Enter 처리도 수정해 조합 확정 Enter가 단어 도중에 전송되지 않도록 했습니다 ([#146](https://github.com/HKUDS/Vibe-Trading/pull/146)).
+<details>
+<summary>이전 뉴스</summary>
+
+- **2026-05-29** 🔐 **Robinhood Agentic Trading 지원(옵트인, 제한된 자율성)**: Robinhood Agentic Trading을 지원합니다(원격 MCP, OAuth). 기본적으로 비활성·읽기 전용이며, 에이전트는 사용자가 커밋한 mandate(종목/주문 규모/익스포저/레버리지/일일 한도) 범위 안에서만 자율 거래합니다. 파일 수준의 즉시 kill switch, 선제적 포지션 청산, mandate 자동 만료, 완전한 감사 원장, 영속 자율 runner를 갖췄습니다. 수탁 없음·거래소 없음 — 자금 보유와 체결은 브로커가 하고, 우리는 의도만 중계합니다. 실험적 / 사용에 따른 책임은 본인에게 있습니다.
 - **2026-05-28** 🧪 **Swarm 안전성 + 엄격 alpha 게이트 + worker MCP**: Swarm DAG가 상위 태스크 실패 시 하위 태스크를 차단합니다 ([#145](https://github.com/HKUDS/Vibe-Trading/pull/145)). 새 `run_bench_strict()`는 IC 게이트 위에 동일 universe 랜덤 컨트롤 + 학습/테스트 OOS 분할을 추가해 시장 beta만 따라가는 가짜 factor를 잡아냅니다 ([#143](https://github.com/HKUDS/Vibe-Trading/pull/143), @Soli22de 감사). Swarm worker는 이제 operator가 설정한 외부 MCP server를 호출할 수 있으며 신뢰 경계는 전용 테스트로 고정되어 있습니다 ([#142](https://github.com/HKUDS/Vibe-Trading/pull/142), @shadowinlife 감사).
 - **2026-05-27** 📊 **mootdx A주 데이터 소스 + 출력 정리**: 새 `mootdx` loader는 네이티브 通达信 TCP 프로토콜로 A주 OHLCV를 가져옵니다(인증 불필요, IP 속도 제한 없음, 일봉 + 분봉의 25 페이지 walk-back 페이지네이션). fallback chain에서 tushare와 akshare 사이에 위치합니다 ([#107](https://github.com/HKUDS/Vibe-Trading/issues/107)). CCXT loader는 이제 `HTTP_PROXY/HTTPS_PROXY/ALL_PROXY`를 읽어 제한된 네트워크에서 Binance/OKX 공개 데이터를 가져올 수 있습니다 ([#126](https://github.com/HKUDS/Vibe-Trading/pull/126), @ruok808 감사). 최종 답변 렌더링에서도 CLI와 Web의 보기 흉한 전체 너비 `---` 구분자를 제거했습니다: system prompt는 markdown 테이블과 `##` 헤딩 사용을 유도하고, CLI 렌더러는 독립 HR을 defense-in-depth로 제거하며, 채팅 버블은 빠져나온 `<hr>`을 숨깁니다 ([#139](https://github.com/HKUDS/Vibe-Trading/issues/139), @sdwxm188 감사).
 - **2026-05-26** ✅ **Research Goal lifecycle 폐쇄 루프**: Goal mode가 실제 task runner처럼 동작합니다. Web UI에서 goal을 만들면 session을 생성하거나 바인딩하고 즉시 kickoff turn을 보냅니다. active goal은 Web/API/CLI/MCP에서 continue/edit/cancel/complete할 수 있으며, agent loop는 최초 prompt만이 아니라 현재 goal snapshot(criteria, evidence, claims, open items)을 기준으로 진행합니다. criteria가 covered였지만 goal이 active로 남아 있으면 조용히 멈추지 않고 audit/status update로 들어가며, backend, CLI, MCP, frontend events 회귀로 고정했습니다.
-<details>
-<summary>이전 뉴스</summary>
 
 - **2026-05-25** 🧼 **더 깔끔한 Chat UI + composer 워크플로**: Web UI는 이제 다음 입력에 집중하도록 정리되었습니다. upload, swarm, research-goal 모드는 composer의 `+` 메뉴 뒤로 모이고, floating panel로 채팅을 방해하지 않습니다. 현재 context는 입력창 위 compact chip으로 표시되며, goal 세부 정보는 chip을 클릭할 때만 inline으로 펼쳐집니다. 기존 custom i18n layer도 제거하고 직접 English copy로 통일했습니다. Full Report card는 report-worthy run에만 표시되며, 로컬 dev startup/status reporting도 브라우저 smoke test에 맞게 안정화했습니다.
 - **2026-05-24** 🎯 **Research Goal runtime**: backend, CLI, API/MCP, SSE, Web UI 전반에 session-scoped Research Goal layer를 추가했습니다. Goal은 claim, acceptance criteria, evidence row, budget, completion policy를 영속화합니다. agent tool은 goal 생성과 evidence 추가를 지원하고, `/goal`은 CLI 진입점이 되었으며, REST/MCP는 goal snapshot과 evidence write를 노출하고, SSE는 chat client 상태를 최신으로 유지합니다. 후속 audit fixes에서는 verified evidence 경계를 잠그고, agent tool의 live-trading risk tier 입력을 차단하며, CLI-created goal을 이후 turn에 연결하고, session 삭제 시 goal ledger를 정리하고, replay-all을 연결하고, frontend cross-session snapshot race를 수정했습니다.
@@ -152,7 +157,7 @@
 
 Vibe-Trading은 금융 질문을 실행 가능한 분석으로 바꾸는 오픈소스 리서치 워크스페이스입니다. 자연어 프롬프트를 시장 데이터 로더, 전략 생성, 백테스트 엔진, 리포트, 내보내기, 영구 리서치 메모리와 연결합니다.
 
-리서치, 시뮬레이션, 백테스팅을 위해 설계되었습니다. 실거래는 실행하지 않습니다.
+리서치, 시뮬레이션, 백테스팅을 위해 설계되었습니다 — 그리고 원하신다면, 사용자가 직접 인가한 브로커(예: Robinhood Agentic Trading)를 통한 자율 거래도 가능합니다. 자금을 일절 보유하지 않고, 사용자가 설정한 한도를 결코 넘지 않으며, 언제든 즉시 중단할 수 있습니다.
 
 ---
 
@@ -670,7 +675,7 @@ Settings read는 side effect가 없습니다. `GET /settings/llm`과 `GET /setti
 
 ## 🔌 MCP Plugin
 
-Vibe-Trading은 모든 MCP-compatible client를 위해 22개 MCP tools를 제공합니다. stdio subprocess로 실행되므로 server setup이 필요 없습니다. **22개 중 21개 tools는 API key 없이 작동합니다**(HK/US/crypto). `run_swarm`만 LLM key가 필요합니다.
+Vibe-Trading은 모든 MCP-compatible client를 위해 36개 MCP tools를 제공합니다. stdio subprocess로 실행되므로 server setup이 필요 없습니다. 핵심 research tools는 HK/US/crypto에서 API key 없이 작동하고, trading connector tools는 선택된 connector profile을 사용하며, `run_swarm`만 LLM key가 필요합니다.
 
 <details>
 <summary><b>Claude Desktop</b></summary>
@@ -712,7 +717,7 @@ vibe-trading-mcp --transport sse  # SSE for web clients
 
 </details>
 
-**노출되는 MCP tools(22):** `list_skills`, `load_skill`, `backtest`, `factor_analysis`, `analyze_options`, `pattern_recognition`, `get_market_data`, `web_search`, `read_url`, `read_document`, `read_file`, `write_file`, `analyze_trade_journal`, `extract_shadow_strategy`, `run_shadow_backtest`, `render_shadow_report`, `scan_shadow_signals`, `list_swarm_presets`, `run_swarm`, `get_swarm_status`, `get_run_result`, `list_runs`.
+**노출되는 MCP tools(36):** `list_skills`, `load_skill`, `start_research_goal`, `get_research_goal`, `add_goal_evidence`, `update_research_goal_status`, `backtest`, `factor_analysis`, `analyze_options`, `pattern_recognition`, `read_url`, `read_document`, `web_search`, `write_file`, `read_file`, `trading_connections`, `trading_select_connection`, `trading_check`, `trading_account`, `trading_positions`, `trading_orders`, `trading_quote`, `trading_history`, `list_swarm_presets`, `run_swarm`, `get_market_data`, `get_swarm_status`, `get_run_result`, `list_runs`, `reap_stale_runs`, `retry_run`, `analyze_trade_journal`, `extract_shadow_strategy`, `run_shadow_backtest`, `render_shadow_report`, `scan_shadow_signals`.
 
 <details>
 <summary><b>ClawHub에서 설치(한 번의 명령)</b></summary>
@@ -770,7 +775,7 @@ Vibe-Trading/
 ├── agent/                          # Backend (Python)
 │   ├── cli/                        # CLI package — interactive TUI + subcommands
 │   ├── api_server.py               # FastAPI server — runs, sessions, upload, swarm, SSE
-│   ├── mcp_server.py               # MCP server — 22 tools for OpenClaw / Claude Desktop
+│   ├── mcp_server.py               # MCP server — 36 tools for OpenClaw / Claude Desktop
 │   │
 │   ├── src/
 │   │   ├── agent/                  # ReAct agent core
@@ -897,17 +902,21 @@ Vibe-Trading은 **[HKUDS](https://github.com/HKUDS)** agent ecosystem의 일부�
 
 Vibe-Trading에 기여해 주신 모든 분께 감사드립니다!
 
-최근 v0.1.8 cycle contributors and credits:
+최근 v0.1.9 cycle contributors and credits:
 
-- @GTC2080 / TaoMu — Web UI Settings and provider/data-source configuration APIs (#57)
-- @BigNounce90 — validation CLI hardening for backtest `run_dir` input (#60)
-- @shadowinlife — A-share pre-ST filter skill (#63)
-- @MB-Ndhlovu — correlation heatmap dashboard and review fixes (#64, #66)
-- @ykykj — OpenAI Codex OAuth provider option (#65)
-- @RuifengFu — interactive CLI live status bar and prompt editing (#69)
-- @SiMinus — swarm preset inspection command (#73)
-- @warren618 / Haozhe Wu — security hardening, release integration, docs, Docker, packaging, and local dev workflow
-- lemi9090 (S2W) — coordinated security research, validation, and disclosure support
+- @toanalien — session JSONL crash-hardening (#147), graceful agent-loop exit at the iteration budget (#148), pre-flight validation for LLM-generated signal engines (#149), and cross-browser Full Report links (#150)
+- @ai7eam-dev — cross-market correlation timestamp alignment (#158) and the session running-status indicator + swarm retry (#159 → #160)
+- @shadowinlife — remote MCP servers over SSE/HTTP (#125) and operator-configured external MCP tools in swarm workers (#142)
+- @DoubleSky123 — configurable SSE idle timeout (#157)
+- @ArthurXi — IME Enter submission handling in the Web composer (#146)
+- @omcdecor-cyber — swarm DAG gating when an upstream task fails (#145)
+- @Soli22de — strict alpha-bench mode with a mandatory random control (#143)
+- @ruok808 — proxy-env support in the CCXT loader (#126)
+- @faizack — remote Ollama base-URL normalization (#129)
+- @fightZy — agent session history loading fix (#136)
+- @lcwSeven — short universe names in the alpha list endpoint (#137)
+- @Teerapat-Vatpitak — resolved .env-source logging (#124)
+- @warren618 / Haozhe Wu — connector-first broker profiles, the Robinhood Agentic Trading channel, Research Goal runtime, swarm reconcile + retry_run, the agent/cli refactor, the mootdx loader, and release integration
 
 <a href="https://github.com/HKUDS/Vibe-Trading/graphs/contributors">
   <img src="https://contrib.rocks/image?repo=HKUDS/Vibe-Trading" />
@@ -917,7 +926,7 @@ Vibe-Trading에 기여해 주신 모든 분께 감사드립니다!
 
 ## 면책조항
 
-Vibe-Trading은 리서치, 시뮬레이션, 백테스팅 전용입니다. 투자 조언이 아니며 실거래를 실행하지 않습니다. 과거 성과가 미래 수익을 보장하지 않습니다.
+Vibe-Trading은 리서치 및 거래 소프트웨어입니다. 투자 조언이 아니며, 자금을 보유하지 않고, 거래소를 운영하지 않습니다. 거래는 사용자가 명시적으로 인가한 브로커 채널(예: Robinhood Agentic Trading)을 통해서만, 사용자가 설정한 한도 내에서 이루어지며 언제든 중단할 수 있습니다. 이 브로커 거래 기능은 실험적이며 당사가 실제 브로커 계정으로 검증하지 않았습니다 — 사용에 따른 책임은 본인에게 있습니다. 과거 성과가 미래 수익을 보장하지 않습니다.
 
 ## 라이선스
 

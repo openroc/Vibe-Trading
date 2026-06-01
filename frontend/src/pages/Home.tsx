@@ -4,7 +4,7 @@ import { ArrowRight, Bot, BarChart3, Zap, UserCircle2 } from "lucide-react";
 export function Home() {
   const FEATURES = [
     { icon: Bot, title: "AI Agent", desc: "Natural language strategy generation with ReAct reasoning" },
-    { icon: BarChart3, title: "Built-in Backtest", desc: "3 data sources: A-shares, US/HK, Crypto" },
+    { icon: BarChart3, title: "Built-in Backtest", desc: "7 data sources across A-shares, US/HK & Crypto" },
     { icon: Zap, title: "Real-time Streaming", desc: "Watch the agent think, call tools, and iterate" },
     { icon: UserCircle2, title: "Strategy Replay", desc: "Trade journal analyzer + Shadow Account — extract your rules, backtest them, attribute PnL delta" },
   ];

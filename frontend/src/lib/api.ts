@@ -123,6 +123,8 @@ export const api = {
   swarmSseUrl: (id: string) => withAuthQuery(`${BASE}/swarm/runs/${id}/events`),
   cancelSwarmRun: (id: string) =>
     request<{ status: string }>(`/swarm/runs/${id}/cancel`, { method: "POST" }),
+  retrySwarmRun: (id: string) =>
+    request<{ id: string; status: string; preset_name: string }>(`/swarm/runs/${id}/retry`, { method: "POST" }),
   getLLMSettings: () => request<LLMSettings>("/settings/llm"),
   updateLLMSettings: (settings: UpdateLLMSettingsRequest) =>
     request<LLMSettings>("/settings/llm", {
@@ -155,6 +157,38 @@ export const api = {
     }),
   alphaBenchStreamUrl: (jobId: string) =>
     withAuthQuery(`${BASE}/alpha/bench/${encodeURIComponent(jobId)}/stream`),
+
+  // Connector runtime channel — privileged surface actions (NOT agent tools).
+  // commit is the ONLY action that writes a mandate; halt trips the kill switch.
+  commitMandate: (body: CommitMandateRequest) =>
+    request<CommitMandateResponse>("/mandate/commit", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  haltLive: (session_id?: string, broker?: string, reason?: string) =>
+    request<HaltLiveResponse>("/live/halt", {
+      method: "POST",
+      body: JSON.stringify({ session_id, broker, reason }),
+    }),
+  // Read the persistent runtime status across all authorized brokers (SPEC §7.5).
+  // Polled by the RunnerStatus panel; a plain authenticated GET, never a chat message.
+  getLiveStatus: () => request<LiveStatus>("/live/status"),
+  authorizeLive: (broker: string) =>
+    request<LiveAuthorizeResponse>("/live/authorize", {
+      method: "POST",
+      body: JSON.stringify({ broker }),
+    }),
+  // Start/stop the persistent runner (SPEC §7.5). Privileged surface actions, not agent tools.
+  startLiveRunner: (broker: string) =>
+    request<LiveRunnerResponse>("/live/runner/start", {
+      method: "POST",
+      body: JSON.stringify({ broker }),
+    }),
+  stopLiveRunner: (broker: string) =>
+    request<LiveRunnerResponse>("/live/runner/stop", {
+      method: "POST",
+      body: JSON.stringify({ broker }),
+    }),
 };
 
 // --- Swarm types ---
@@ -200,6 +234,7 @@ export interface LLMSettings {
   timeout_seconds: number;
   max_retries: number;
   reasoning_effort: string;
+  sse_timeout_seconds: number;
   env_path: string;
   providers: LLMProviderOption[];
 }
@@ -642,6 +677,181 @@ export interface AlphaBenchResult {
   top5_by_ir: AlphaBenchTopRow[];
   dead_examples: AlphaBenchTopRow[];
   by_theme: Record<string, { alive: number; reversed: number; dead: number }>;
+}
+
+// --- Connector runtime channel types ---
+
+/** One mandate profile inside a `mandate.proposal` event (SPEC Consent §1). */
+export interface MandateProfile {
+  ordinal: number;
+  label: string;
+  /** Concrete ticker list, or a structural universe descriptor (e.g. "tech_sector"). */
+  universe: string[] | string;
+  max_order_usd: number;
+  daily_trade_cap: number;
+  /** "none" for cash-only, otherwise a leverage descriptor/multiple. */
+  leverage: string | number;
+  instruments: string[];
+  notes?: string;
+}
+
+/** Account block of a `mandate.proposal` event. */
+export interface MandateProposalAccount {
+  broker: string;
+  type: string;
+  funded_by: string;
+}
+
+/** Payload of the `mandate.proposal` SSE event (SPEC Consent §1). */
+export interface MandateProposal {
+  type?: string;
+  proposal_id: string;
+  session_id?: string;
+  intent_normalized?: string;
+  account?: MandateProposalAccount;
+  ceilings_ref?: string;
+  profiles: MandateProfile[];
+  funding_note?: string;
+  halt_note?: string;
+  /** Present only when this proposal was triggered by a mandate breach (SPEC Consent §3). */
+  reauth_for?: { breach_id?: string } | null;
+}
+
+/** Payload of the `mandate.committed` SSE event (SPEC Consent §1 COMMIT). */
+export interface MandateCommitted {
+  proposal_id?: string;
+  mandate_id?: string;
+  consent_record_id?: string;
+  selected_ordinal?: number;
+  broker?: string;
+  /** Resolved limits, surfaced for the compact active-mandate badge. */
+  max_order_usd?: number;
+  daily_trade_cap?: number;
+  expires_at?: string;
+}
+
+/** Payload of the `live.halted` SSE event (SPEC Consent §4). */
+export interface LiveHalted {
+  broker?: string | null;
+  tripped_at?: string;
+  by?: string;
+  reason?: string;
+}
+
+/** Payload of the `live.action` SSE event (SPEC Consent §5 audit notify). */
+export interface LiveAction {
+  audit_id?: string;
+  ts?: string;
+  kind: string;
+  intent_normalized?: string;
+  outcome?: string;
+  broker?: string;
+  remote_tool?: string;
+  error?: string | null;
+}
+
+export interface CommitMandateRequest {
+  broker: string;
+  proposal_id: string;
+  selected_ordinal: number;
+  /** Present only on the adjust path (SPEC Consent §3); null otherwise. */
+  adjustments?: Record<string, unknown> | null;
+  /** Explicit affirmative consent; the surface sets it on the user's click. */
+  consent_ack: boolean;
+  session_id?: string;
+  account_ref?: string;
+  lifetime_days?: number;
+}
+
+export interface CommitMandateResponse {
+  mandate_id: string;
+  consent_record_id: string;
+  selected_ordinal?: number;
+  broker?: string;
+  max_order_usd?: number;
+  daily_trade_cap?: number;
+  expires_at?: string;
+}
+
+export interface HaltLiveResponse {
+  halted: boolean;
+  broker?: string | null;
+  reason: string;
+  sentinel: string;
+}
+
+export interface LiveAuthorizeRequest {
+  broker: string;
+}
+
+export interface LiveAuthorizeResponse {
+  broker: string;
+  connector_profile: string;
+  oauth_token_present: boolean;
+  instruction: string;
+  note?: string;
+}
+
+/** Mandate limits surfaced inside a `GET /live/status` broker entry (SPEC §7.5). */
+export interface LiveMandateLimits {
+  max_order_notional_usd?: number;
+  max_total_exposure_usd?: number;
+  max_leverage?: number;
+  max_trades_per_day?: number;
+  allowed_instruments?: string[];
+  account_funding_usd?: number;
+  [key: string]: unknown;
+}
+
+/** Active mandate block of a `GET /live/status` broker entry. */
+export interface LiveMandateStatus {
+  broker?: string;
+  mandate_id?: string;
+  account_ref?: string;
+  created_at?: string;
+  limits?: LiveMandateLimits;
+  /** ISO timestamp the mandate auto-expires (SPEC §7.5 #7 proactive expiry). */
+  expires_at?: string;
+  expires_in_seconds?: number | null;
+  expired?: boolean;
+}
+
+/** Runner liveness block of a `GET /live/status` broker entry (SPEC §7.5 #3). */
+export interface LiveRunnerLiveness {
+  broker?: string;
+  alive: boolean;
+  /** Unix epoch seconds of the last heartbeat tick; null if the runner never started. */
+  last_tick?: number | string | null;
+  last_tick_age_seconds?: number | null;
+}
+
+export interface LiveBrokerAuthStatus {
+  broker: string;
+  oauth_token_present: boolean;
+  is_live_broker: boolean;
+}
+
+/** One broker entry in the `GET /live/status` response. */
+export interface LiveBrokerStatus {
+  auth: LiveBrokerAuthStatus;
+  mandate?: LiveMandateStatus | null;
+  runner: LiveRunnerLiveness;
+  halted: boolean;
+}
+
+/** Response of `GET /live/status` (SPEC §7.5 runner status panel + C2). */
+export interface LiveStatus {
+  brokers: LiveBrokerStatus[];
+  global_halted: boolean;
+}
+
+/** Response of `POST /live/runner/start|stop`. */
+export interface LiveRunnerResponse {
+  broker: string;
+  started?: boolean;
+  already_running?: boolean;
+  stopped?: boolean;
+  was_running?: boolean;
 }
 
 export interface MessageItem {

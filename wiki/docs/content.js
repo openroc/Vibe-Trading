@@ -1,9 +1,10 @@
-export const DOCS_DEFAULT_VERSION = "0.1.8";
+export const DOCS_DEFAULT_VERSION = "0.1.9";
 export const DOCS_LATEST_ALIAS = "latest";
 export const DOCS_DEFAULT_PAGE = "getting-started/vibe-trading-overview";
 
 export const DOCS_VERSIONS = [
-  { name: "0.1.8", label: "0.1.8 (latest)" },
+  { name: "0.1.9", label: "0.1.9 (latest)" },
+  { name: "0.1.8", label: "0.1.8" },
   { name: "0.1.7", label: "0.1.7" }
 ];
 

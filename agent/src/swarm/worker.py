@@ -28,6 +28,7 @@ from src.swarm.models import (
 )
 from src.tools import build_swarm_registry
 from src.tools.mcp import MCPRemoteTool
+from src.tools.redaction import is_sensitive_arg, redact_payload
 
 logger = logging.getLogger(__name__)
 
@@ -50,17 +51,6 @@ def _heartbeat_interval_s() -> float:
 
 _HEARTBEAT_INTERVAL_S = _heartbeat_interval_s()
 _MAX_TOKEN_ESTIMATE = 60_000
-_SENSITIVE_TOOL_ARGUMENT_KEYS = {
-    "api_key",
-    "authorization",
-    "content",
-    "env",
-    "headers",
-    "passphrase",
-    "password",
-    "secret",
-    "token",
-}
 
 
 def _emit(
@@ -653,10 +643,10 @@ def _preview_tool_arguments(arguments: dict) -> dict[str, str]:
     for key, value in arguments.items():
         if key == "run_dir":
             continue
-        if _is_sensitive_tool_argument(key):
+        if is_sensitive_arg(key):
             preview[key] = "[redacted]"
             continue
-        preview[key] = _truncate_preview(_redact_preview_payload(value))
+        preview[key] = _truncate_preview(redact_payload(value))
     return preview
 
 
@@ -666,19 +656,7 @@ def _preview_tool_result(result: str) -> str:
         parsed = json.loads(result)
     except (TypeError, ValueError):
         return _truncate_preview(result)
-    return _truncate_preview(_redact_preview_payload(parsed))
-
-
-def _redact_preview_payload(value: Any) -> Any:
-    """Recursively redact sensitive keys before event preview stringification."""
-    if isinstance(value, dict):
-        return {
-            key: "[redacted]" if _is_sensitive_tool_argument(str(key)) else _redact_preview_payload(item)
-            for key, item in value.items()
-        }
-    if isinstance(value, list):
-        return [_redact_preview_payload(item) for item in value]
-    return value
+    return _truncate_preview(redact_payload(parsed))
 
 
 def _truncate_preview(value: Any, *, limit: int = 200) -> str:
@@ -688,15 +666,6 @@ def _truncate_preview(value: Any, *, limit: int = 200) -> str:
     else:
         text = str(value)
     return text if len(text) <= limit else text[:limit] + "..."
-
-
-def _is_sensitive_tool_argument(key: str) -> bool:
-    """Return whether a tool argument name should be redacted in events."""
-    normalized = key.strip().lower()
-    return normalized in _SENSITIVE_TOOL_ARGUMENT_KEYS or any(
-        marker in normalized
-        for marker in ("api_key", "authorization", "password", "secret", "token")
-    )
 
 
 # Tools that do not themselves fetch/compute market data. An agent whose

@@ -71,6 +71,7 @@ def build_registry(
     session_id: str | None = None,
     event_callback: Callable[[str, dict], None] | None = None,
     warn_callback: Callable[[str], None] | None = None,
+    interactive: bool | None = None,
     _mcp_server_tool_name_segments: Mapping[str, str] | None = None,
 ) -> ToolRegistry:
     """Build the tool registry via auto-discovery, optionally enriched with MCP tools.
@@ -101,6 +102,12 @@ def build_registry(
             messages. When provided, server-name collision warnings are passed
             to this callback in addition to the standard logger so CLI and
             SessionService can surface them to operators.
+        interactive: Whether the session is an interactive TTY. Governs whether
+            a live-broker channel with no cached OAuth token is registered: a
+            non-interactive run (``serve`` / swarm) skips an unauthorized live
+            channel rather than blocking on a browser that cannot open
+            (SPEC Transport §4). ``None`` (default) auto-detects via
+            ``sys.stdin.isatty()``.
 
     Returns:
         ToolRegistry containing all available local tools followed by any
@@ -155,13 +162,69 @@ def build_registry(
                 for server_name in agent_config.mcp_servers
             }
 
+        if interactive is None:
+            import sys
+
+            interactive = sys.stdin.isatty()
+
         for server_name, server_config in agent_config.mcp_servers.items():
             try:
+                # Live brokers (e.g. Robinhood) gate their order-placing tools
+                # behind the mandate + kill switch; reads stay plain (read-only).
+                # Detection is by config key OR URL host, so a live-broker URL
+                # under an aliased key cannot bypass the gate.
+                from src.live.registry import (
+                    is_live_broker,
+                    should_register_live_channel,
+                    wrap_live_broker_tools,
+                )
+
+                server_url = server_config.url
+                live = is_live_broker(server_name, server_url)
+
+                # Headless / no-token: skip an unauthorized live channel rather
+                # than block on a browser that can't open (SPEC Transport §4).
+                if live:
+                    cache_dir = (
+                        server_config.auth.cache_dir
+                        if server_config.auth is not None
+                        else None
+                    )
+                    if not should_register_live_channel(
+                        interactive=interactive, url=server_url, cache_dir=cache_dir
+                    ):
+                        profile_hint = (
+                            "ibkr-live-official-mcp-readonly"
+                            if server_name.strip().lower() == "ibkr"
+                            else f"{server_name}-live-mcp"
+                        )
+                        skip_msg = (
+                            f"{server_name} live connector configured but not authorized — "
+                            f"run `vibe-trading connector authorize {profile_hint}` "
+                            f"on a desktop session"
+                        )
+                        logger.warning(skip_msg)
+                        if warn_callback is not None:
+                            warn_callback(skip_msg)
+                        continue
+                    info_msg = (
+                        f"{server_name} live connector is available through trading_* tools; "
+                        "broker-specific MCP wrappers are hidden from the agent registry"
+                    )
+                    logger.info(info_msg)
+                    if warn_callback is not None:
+                        warn_callback(info_msg)
+                    continue
+
                 wrappers = build_mcp_tool_wrappers(
                     server_name,
                     server_config,
                     local_server_name=local_server_names[server_name],
                 )
+                if live:
+                    wrappers = wrap_live_broker_tools(
+                        server_name, wrappers, url=server_url
+                    )
                 for tool in wrappers:
                     registry.register(tool)
                 logger.info(
