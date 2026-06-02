@@ -1,11 +1,19 @@
-"""TDX (通达信) MCP loader: A-share data via MCP server.
+"""TDX (通达信) MCP loader: A-share data via upgraded MCP server.
 
-Connects to the TDX MCP server (192.168.3.2:3100/3101, 192.168.3.53:3100/3101)
-and exposes its tools for OHLCV data, sector/industry boards, stock info,
-dividends, trading calendars, and real-time snapshots.
+Connects to the TDX MCP server (default 192.168.3.2/192.168.3.53 on ports
+3100/3101) over the streamable-HTTP transport (POST /mcp with JSON-RPC 2.0)
+and exposes its 30+ tools for OHLCV data, sector/industry boards, stock
+info, dividends, trading calendars, real-time snapshots, financial /
+operating data, convertible bonds, IPO subscriptions, share capital, and
+client actions (custom sectors, broadcast).
 
-Only the ``fetch()`` method is called by the backtest runner. All other methods
-are exposed for direct use in research workflows.
+The transport is governed by MCP protocol version 2024-11-05: an
+``initialize`` handshake is followed by ``tools/list`` and ``tools/call``,
+with the session id carried in the ``Mcp-Session-Id`` header. The legacy
+SSE endpoint (``/sse``) is no longer available on the upgraded server.
+
+Only the ``fetch()`` method is called by the backtest runner. All other
+methods are exposed for direct use in research workflows.
 
 TDX period values: ``1d`` (daily) | ``1w`` (weekly) | ``1mon`` (monthly) |
 ``1y`` (yearly). Intraday bars are not supported.
@@ -13,14 +21,13 @@ TDX period values: ``1d`` (daily) | ``1w`` (weekly) | ``1mon`` (monthly) |
 
 from __future__ import annotations
 
-from datetime import timedelta
-import asyncio
 import json
 import logging
 import os
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
 import pandas as pd
+import requests
 
 from agent.backtest.loaders.base import validate_date_range
 from agent.backtest.loaders.registry import register
@@ -47,149 +54,204 @@ _PERIOD_MAP: Dict[str, str] = {
     "1Y": "1y",
 }
 
+# Default dividend adjustment when fetching market data: "none" keeps raw
+# prices, "front" applies forward adjustment, "back" applies backward
+# adjustment.
+_DIVIDEND_TYPE_MAP: Dict[str, str] = {
+    "none": "none",
+    "front": "front",
+    "back": "back",
+}
+
 # ------------------------------------------------------------------
 # Loader
 # ------------------------------------------------------------------
 
 @register
 class DataLoader:
-    """TDX MCP-backed A-share OHLCV loader and research API."""
+    """TDX MCP-backed A-share OHLCV loader and research API.
+
+    Uses the streamable-HTTP MCP transport (JSON-RPC 2.0 over POST /mcp) with
+    a session id returned by the server on the ``initialize`` handshake.
+    """
 
     name = "tdx"
     markets = {"a_share"}
     requires_auth = False
 
     def __init__(self) -> None:
-        self._session: Optional[Any] = None
-        self._streams: Optional[Tuple[Any, Any]] = None
         self._host: Optional[str] = None
         self._port: Optional[int] = None
+        self._session_id: Optional[str] = None
+        self._request_id: int = 0
+        self._initialized: bool = False
 
     # ------------------------------------------------------------------
     # Availability check
     # ------------------------------------------------------------------
 
     def is_available(self) -> bool:
-        """Return True if any TDX MCP server responds on the /sse endpoint."""
-        try:
-            import mcp  # noqa: F401
-        except ImportError:
-            logger.debug("mcp package not installed")
-            return False
-        # 直接尝试完整连接
+        """Return True if any TDX MCP server responds to the initialize handshake."""
         for host in _TDX_HOSTS:
             for port in TDX_PORTS:
-                if self._try_connect(host, port):
-                    self._cleanup()
+                if self._try_initialize(host, port):
                     return True
-        logger.debug("No TDX MCP server reachable")
-        return False
         logger.debug("No TDX MCP server reachable")
         return False
 
     # ------------------------------------------------------------------
-    # MCP session management
+    # Transport — streamable-HTTP / JSON-RPC 2.0
     # ------------------------------------------------------------------
 
-    def _connect(self) -> bool:
-        """Establish connection to TDX MCP, trying all host:port combos."""
-        if self._session is not None:
-            return True
+    def _endpoint(self) -> str:
+        return f"http://{self._host}:{self._port}/mcp"
 
-        for host in _TDX_HOSTS:
-            for port in TDX_PORTS:
-                if self._try_connect(host, port):
-                    return True
-
-        logger.warning("All TDX MCP servers unavailable")
-        return False
-
-    def _try_connect(self, host: str, port: int) -> bool:
+    def _try_initialize(self, host: str, port: int) -> bool:
+        """Open a session to host:port and send the ``initialize`` handshake."""
         try:
-            from mcp import ClientSession
-            from mcp.client.sse import sse_client
-
-            loop = asyncio.get_event_loop()
-        except Exception as exc:
-            logger.debug("Failed to get event loop: %s", exc)
-            return False
-
-        try:
-            async def _async_connect():
-                streams = sse_client(
-                    f"http://{host}:{port}/sse", timeout=TDX_TIMEOUT
-                )
-                read_stream, write_stream = await streams.__aenter__()
-                session = ClientSession(read_stream, write_stream, timedelta(seconds=TDX_TIMEOUT))
-                await session.__aenter__()
-                await session.initialize()
-                return streams, session
-
-            self._streams, self._session = loop.run_until_complete(
-                _async_connect()
-            )
             self._host = host
             self._port = port
-            logger.debug("Connected to TDX MCP at %s:%s", host, port)
+            self._session_id = None
+            self._request_id = 0
+            self._initialized = False
+
+            response = self._post({
+                "jsonrpc": "2.0",
+                "id": self._next_id(),
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {
+                        "name": "vibe-trading-tdx-loader",
+                        "version": "1.0.0",
+                    },
+                },
+            })
+            if response is None:
+                return False
+            if "error" in response:
+                logger.debug("Initialize error from %s:%s: %s", host, port, response["error"])
+                return False
+            self._initialized = True
+            logger.debug("Connected to TDX MCP at %s:%s (session=%s)", host, port, self._session_id)
             return True
         except Exception as exc:
-            logger.debug("Failed to connect to TDX MCP at %s:%s: %s", host, port, exc)
-            self._session = None
-            self._streams = None
+            logger.debug("Failed to initialize TDX MCP at %s:%s: %s", host, port, exc)
+            self._initialized = False
+            self._session_id = None
             return False
 
-    def _cleanup(self) -> None:
+    def _next_id(self) -> int:
+        self._request_id += 1
+        return self._request_id
+
+    def _post(self, payload: dict, *, timeout: Optional[int] = None) -> Optional[dict]:
+        """POST a JSON-RPC 2.0 request to /mcp, return parsed response or None.
+
+        Captures the ``Mcp-Session-Id`` header on every response (the server
+        may rotate it). Returns ``None`` on any transport failure so callers
+        can fall through cleanly.
+        """
+        if not self._host or not self._port:
+            return None
+        url = self._endpoint()
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+        }
+        if self._session_id:
+            headers["Mcp-Session-Id"] = self._session_id
         try:
-            loop = asyncio.get_event_loop()
-        except Exception:
-            return
+            resp = requests.post(
+                url,
+                headers=headers,
+                data=json.dumps(payload),
+                timeout=timeout if timeout is not None else TDX_TIMEOUT,
+            )
+        except Exception as exc:
+            logger.debug("HTTP error talking to %s: %s", url, exc)
+            return None
+
+        new_sid = resp.headers.get("Mcp-Session-Id")
+        if new_sid:
+            self._session_id = new_sid
+
+        if resp.status_code >= 400:
+            logger.debug("HTTP %s from %s: %s", resp.status_code, url, resp.text[:200])
+            return None
 
         try:
-            async def _async_cleanup():
-                if self._session is not None:
-                    await self._session.__aexit__(None, None, None)
-                if self._streams is not None:
-                    await self._streams.__aexit__(None, None, None)
+            return resp.json()
+        except json.JSONDecodeError:
+            logger.debug("Non-JSON response from %s: %s", url, resp.text[:200])
+            return None
 
-            loop.run_until_complete(_async_cleanup())
-        except Exception:
-            pass
-        finally:
-            self._session = None
-            self._streams = None
+    def _ensure_initialized(self) -> bool:
+        """Make sure we hold an active MCP session; try every host:port combo."""
+        if self._initialized and self._session_id is not None:
+            return True
+        for host in _TDX_HOSTS:
+            for port in TDX_PORTS:
+                if self._try_initialize(host, port):
+                    return True
+        return False
 
     def _call_tool(self, name: str, arguments: dict) -> Optional[Any]:
-        """Call a TDX MCP tool and return the parsed JSON result."""
-        if not self._connect():
+        """Call a TDX MCP tool and return the parsed payload (or None on failure).
+
+        The transport returns ``{"jsonrpc":"2.0","id":N,"result":{...}}``.
+        Tools differ on whether they nest their payload in the MCP standard
+        ``content`` array (text item) or return the dict directly — we
+        handle both transparently in :func:`_unwrap_result`.
+        """
+        if not self._ensure_initialized():
             return None
 
-        try:
-            loop = asyncio.get_event_loop()
-
-            async def _async_call():
-                result = await self._session.call_tool(name, arguments)
-                if result and hasattr(result, "content"):
-                    for item in result.content:
-                        if (
-                            hasattr(item, "type")
-                            and item.type == "text"
-                            and hasattr(item, "text")
-                        ):
-                            try:
-                                return json.loads(item.text)
-                            except json.JSONDecodeError:
-                                logger.warning(
-                                    "Invalid JSON from TDX tool %s", name
-                                )
-                                return None
-                return None
-
-            return loop.run_until_complete(_async_call())
-
-        except Exception as exc:
-            logger.warning("TDX tool %s failed: %s", name, exc)
-            self._cleanup()
+        response = self._post({
+            "jsonrpc": "2.0",
+            "id": self._next_id(),
+            "method": "tools/call",
+            "params": {
+                "name": name,
+                "arguments": arguments or {},
+            },
+        })
+        if response is None:
             return None
+        if "error" in response:
+            logger.debug("Tool %s error: %s", name, response["error"])
+            return None
+        return self._unwrap_result(response.get("result"))
+
+    @staticmethod
+    def _unwrap_result(result: Any) -> Any:
+        """Normalize the heterogeneous ``result`` shapes returned by TDX tools.
+
+        Three shapes are observed across the 30+ tools:
+
+        1. ``{"content": [{"type": "text", "text": "<json string>"}]}`` — the
+           MCP standard content wrapper; ``text`` is JSON-stringified.
+        2. ``{"ErrorId": "0", "Data": {...}}`` — direct dict, no wrapper.
+        3. A bare list (e.g. ``["600000.SH", "600519.SH"]``).
+
+        All three collapse to the underlying Python object so callers can
+        treat every tool response uniformly.
+        """
+        if not isinstance(result, dict):
+            return result
+        content = result.get("content")
+        if isinstance(content, list) and content:
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("type") == "text" and isinstance(item.get("text"), str):
+                    try:
+                        return json.loads(item["text"])
+                    except (json.JSONDecodeError, TypeError):
+                        return item["text"]
+            return None
+        return result
 
     # ------------------------------------------------------------------
     # OHLCV fetch (called by backtest runner)
@@ -203,6 +265,8 @@ class DataLoader:
         *,
         interval: str = "1D",
         fields: Optional[List[str]] = None,
+        dividend_type: Literal["none", "front", "back"] = "none",
+        fill_data: bool = True,
     ) -> Dict[str, pd.DataFrame]:
         """Fetch A-share OHLCV data via TDX MCP ``get_market_data``.
 
@@ -218,7 +282,11 @@ class DataLoader:
             interval: Bar size. Only ``"1D"`` is fully supported.
             fields: Optional list of field names to request
                 (``Date``, ``Open``, ``High``, ``Low``, ``Close``, ``Volume``,
-                ``Amount``, ``ForwardFactor``, ``VolInStock``).
+                ``Amount``, ``ForwardFactor``, ``VolInStock``, ``Time``).
+            dividend_type: Forward-adjustment mode — ``"none"`` (raw),
+                ``"front"`` (forward), ``"back"`` (backward).
+            fill_data: Whether to backfill missing bars with the last
+                known close.
 
         Returns:
             Mapping ``code -> OHLCV DataFrame`` (index: ``trade_date``).
@@ -235,6 +303,8 @@ class DataLoader:
             args: Dict[str, Any] = {
                 "stockList": codes,
                 "period": period,
+                "dividendType": _DIVIDEND_TYPE_MAP.get(dividend_type, "none"),
+                "fillData": fill_data,
             }
 
             if period == "1d":
@@ -244,14 +314,11 @@ class DataLoader:
             if fields:
                 args["fieldList"] = fields
 
-            # Try get_market_data; fall back to price_df on error or empty response.
             raw = self._call_tool("get_market_data", args)
 
-            # ErrorId "0" = success; treat non-zero int or non-string-0 as error.
-            # Empty/None response also triggers fallback.
             is_error = raw is None or (
                 isinstance(raw, dict)
-                and raw.get("ErrorId") not in (None, "0", 0)
+                and str(raw.get("ErrorId", "")) not in ("", "0")
             )
             if is_error:
                 raw = self._call_tool(
@@ -279,8 +346,6 @@ class DataLoader:
 
         except Exception as exc:
             logger.warning("TDX fetch failed: %s", exc)
-        finally:
-            self._cleanup()
 
         return result
 
@@ -289,24 +354,28 @@ class DataLoader:
     ) -> Optional[pd.DataFrame]:
         """Parse TDX ``get_market_data`` or ``price_df`` response for one code.
 
-        ``get_market_data`` format::
+        ``get_market_data`` format (upgraded server)::
 
             {
                 "ErrorId": "0",
                 "Data": {
                     "600000.SH": {
+                        "ErrorId": "0",
                         "Date": ["20250506", ...],
+                        "Time": ["09:30", ...],
                         "Open": ["11.00", ...],
                         "High": ["11.19", ...],
                         "Low": ["10.80", ...],
                         "Close": ["11.17", ...],
                         "Volume": ["97264624.00", ...],
                         "Amount": ["1085...", ...],
+                        "VolInStock": [...],
+                        "ForwardFactor": [...],
                     }
                 }
             }
 
-        ``price_df`` format::
+        ``price_df`` format (legacy fallback)::
 
             {
                 "dates": ["20250506", ...],
@@ -322,23 +391,23 @@ class DataLoader:
 
         data_for_code: Optional[dict] = None
 
-        # get_market_data
         if "Data" in raw and isinstance(raw["Data"], dict):
             data_for_code = raw["Data"].get(code)
+            if isinstance(data_for_code, dict) and "Data" in data_for_code:
+                # Server may nest one level deeper on the upgraded protocol.
+                data_for_code = data_for_code["Data"]
 
-        # price_df
         if not data_for_code and "data" in raw:
             data_for_code = raw["data"].get(code)
 
         if not data_for_code or not isinstance(data_for_code, dict):
             return None
 
-        # Support both PascalCase and lowercase keys
         def _arr(key: str) -> List[Any]:
-            return (
-                data_for_code.get(key, [])
-                or data_for_code.get(key.lower(), [])
-            )
+            v = data_for_code.get(key)
+            if v is None:
+                v = data_for_code.get(key.lower())
+            return v or []
 
         dates = _arr("Date")
         opens = _arr("Open")
@@ -347,41 +416,51 @@ class DataLoader:
         closes = _arr("Close")
         volumes = _arr("Volume")
         amounts = _arr("Amount")
+        forward_factors = _arr("ForwardFactor")
+        vol_in_stock = _arr("VolInStock")
 
         if not dates:
             return None
 
         rows = []
         for i in range(len(dates)):
-            try:
-                date_str = str(dates[i])
-                rows.append([
-                    date_str,
-                    float(opens[i]) if i < len(opens) else 0.0,
-                    float(highs[i]) if i < len(highs) else 0.0,
-                    float(lows[i]) if i < len(lows) else 0.0,
-                    float(closes[i]) if i < len(closes) else 0.0,
-                    float(volumes[i]) if i < len(volumes) else 0.0,
-                    float(amounts[i]) if amounts and i < len(amounts) else 0.0,
-                ])
-            except (ValueError, TypeError, IndexError):
-                continue
+            date_str = str(dates[i])
+
+            def _safe(idx: int, arr: List[Any], default: float) -> float:
+                if idx >= len(arr):
+                    return default
+                try:
+                    return float(arr[idx])
+                except (ValueError, TypeError):
+                    return default
+
+            row = {
+                "trade_date": date_str,
+                "open": _safe(i, opens, 0.0),
+                "high": _safe(i, highs, 0.0),
+                "low": _safe(i, lows, 0.0),
+                "close": _safe(i, closes, 0.0),
+                "volume": _safe(i, volumes, 0.0),
+                "amount": _safe(i, amounts, 0.0),
+                "forward_factor": _safe(i, forward_factors, 1.0),
+                "vol_in_stock": _safe(i, vol_in_stock, 0.0),
+            }
+            rows.append(row)
 
         if not rows:
             return None
 
-        df = pd.DataFrame(
-            rows, columns=["trade_date", "open", "high", "low", "close", "volume", "amount"]
-        )
+        df = pd.DataFrame(rows)
         df["trade_date"] = pd.to_datetime(df["trade_date"], format="%Y%m%d")
         df = df.set_index("trade_date").sort_index()
 
-        for col in ["open", "high", "low", "close", "volume", "amount"]:
+        for col in [
+            "open", "high", "low", "close", "volume",
+            "amount", "forward_factor", "vol_in_stock",
+        ]:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
-        ohlcv = df[["open", "high", "low", "close", "volume", "amount"]].dropna(
-            subset=["open", "high", "low", "close"]
-        )
+        ohlcv = df.dropna(subset=["open", "high", "low", "close"])
         return ohlcv if not ohlcv.empty else None
 
     # ------------------------------------------------------------------
@@ -425,20 +504,40 @@ class DataLoader:
         Returns:
             DataFrame with columns ``stockCode`` and ``stockName``.
         """
+        # Some clients pass list_type as snake_case; TDX accepts both.
         raw = self._call_tool(
             "get_stock_list", {"market": market, "listType": list_type}
         )
-        if not isinstance(raw, list) or not raw:
+        return self._parse_list_payload(raw, list_type)
+
+    def _parse_list_payload(
+        self, raw: Any, list_type: int
+    ) -> pd.DataFrame:
+        """Parse stock/sector list payloads in either ErrorId-wrapped or bare form."""
+        items: List[Any] = []
+        if isinstance(raw, list):
+            items = raw
+        elif isinstance(raw, dict):
+            if "Data" in raw and isinstance(raw["Data"], list):
+                items = raw["Data"]
+            elif "Value" in raw and isinstance(raw["Value"], list):
+                items = raw["Value"]
+            else:
+                return pd.DataFrame(columns=["stockCode", "stockName"])
+        else:
             return pd.DataFrame(columns=["stockCode", "stockName"])
 
-        if list_type == 0:
+        if not items:
+            return pd.DataFrame(columns=["stockCode", "stockName"])
+
+        if list_type == 0 or all(isinstance(x, str) for x in items):
             return pd.DataFrame(
-                {"stockCode": [c for c in raw if c]},
+                {"stockCode": [c for c in items if c]},
                 columns=["stockCode", "stockName"],
             )
 
         rows = []
-        for item in raw:
+        for item in items:
             if not isinstance(item, dict):
                 continue
             rows.append({
@@ -479,9 +578,7 @@ class DataLoader:
         raw = self._call_tool("get_market_snapshot", args)
         if not isinstance(raw, dict):
             return None
-
-        # Strip ErrorId wrapper if present
-        if "ErrorId" in raw and raw["ErrorId"] != "0":
+        if "ErrorId" in raw and str(raw.get("ErrorId")) not in ("", "0"):
             return None
         return raw
 
@@ -495,7 +592,6 @@ class DataLoader:
         if not snap:
             return None
         df = pd.DataFrame([snap])
-        # Drop the ErrorId column if present
         df = df.drop(columns=["ErrorId"], errors="ignore")
         return df
 
@@ -526,9 +622,31 @@ class DataLoader:
             "get_trading_calendar",
             {"market": market, "startTime": start, "endTime": end},
         )
+        return self._parse_date_list(raw)
+
+    def get_trading_dates(
+        self,
+        market: Literal["SZ", "SH"] = "SH",
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> pd.DataFrame:
+        """Return trading dates for a market (alternate TDX tool).
+
+        Functionally equivalent to :func:`get_trading_calendar`; the upgraded
+        server exposes both endpoints for client compatibility.
+        """
+        start = (start_date or "").replace("-", "")
+        end = (end_date or "").replace("-", "")
+        raw = self._call_tool(
+            "get_trading_dates",
+            {"market": market, "startTime": start, "endTime": end},
+        )
+        return self._parse_date_list(raw)
+
+    @staticmethod
+    def _parse_date_list(raw: Any) -> pd.DataFrame:
         if not isinstance(raw, list):
             return pd.DataFrame(columns=["trade_date"])
-
         dates = []
         for item in raw:
             s = str(item) if not isinstance(item, str) else item
@@ -536,7 +654,6 @@ class DataLoader:
                 dates.append(pd.to_datetime(s, format="%Y%m%d").date())
             except Exception:
                 continue
-
         return pd.DataFrame({"trade_date": dates})
 
     # ------------------------------------------------------------------
@@ -575,14 +692,28 @@ class DataLoader:
                 "endTime": end,
             },
         )
-        if not isinstance(raw, list):
+
+        items: List[Any] = []
+        if isinstance(raw, list):
+            items = raw
+        elif isinstance(raw, dict):
+            if isinstance(raw.get("Data"), list):
+                items = raw["Data"]
+            elif isinstance(raw.get("Value"), list):
+                items = raw["Value"]
+            else:
+                return pd.DataFrame(
+                    columns=["trade_date", "Type", "Bonus", "AlloPrice",
+                             "ShareBonus", "Allotment"]
+                )
+        else:
             return pd.DataFrame(
                 columns=["trade_date", "Type", "Bonus", "AlloPrice",
                          "ShareBonus", "Allotment"]
             )
 
         rows = []
-        for item in raw:
+        for item in items:
             if not isinstance(item, dict):
                 continue
             date_str = str(item.get("Date", item.get("date", "")))
@@ -590,6 +721,26 @@ class DataLoader:
                 trade_date = pd.to_datetime(date_str, format="%Y%m%d")
             except Exception:
                 trade_date = pd.NaT
+
+            # The upgraded server packs the per-date values into a parallel
+            # ``Value`` array (one entry per stockList element). When called
+            # with a single stock, take the first element.
+            value_arr = item.get("Value")
+            if isinstance(value_arr, list) and value_arr:
+                v0 = value_arr[0]
+                if isinstance(v0, dict):
+                    row = {"trade_date": trade_date, **v0}
+                else:
+                    row = {
+                        "trade_date": trade_date,
+                        "Type": item.get("Type", ""),
+                        "Bonus": item.get("Bonus", ""),
+                        "AlloPrice": item.get("AlloPrice", ""),
+                        "ShareBonus": item.get("ShareBonus", ""),
+                        "Allotment": item.get("Allotment", ""),
+                    }
+                rows.append(row)
+                continue
 
             rows.append({
                 "trade_date": trade_date,
@@ -639,7 +790,7 @@ class DataLoader:
             args["fieldList"] = fields
 
         raw = self._call_tool("get_stock_info", args)
-        if not isinstance(raw, dict) or raw.get("ErrorId") not in (None, "0"):
+        if not isinstance(raw, dict) or str(raw.get("ErrorId", "")) not in ("", "0", "None"):
             return None
         raw.pop("ErrorId", None)
         return raw
@@ -683,13 +834,21 @@ class DataLoader:
             DataFrame with columns ``blockCode`` and ``blockName``.
         """
         raw = self._call_tool("get_sector_list", {"listType": list_type})
-        if not isinstance(raw, list) or not raw:
+
+        items: List[Any] = []
+        if isinstance(raw, list):
+            items = raw
+        elif isinstance(raw, dict) and isinstance(raw.get("Data"), list):
+            items = raw["Data"]
+        else:
             return pd.DataFrame(columns=["blockCode", "blockName"])
 
-        if list_type == 1:
-            # list_type=1 already has names
+        if not items:
+            return pd.DataFrame(columns=["blockCode", "blockName"])
+
+        if list_type == 1 or all(isinstance(x, dict) for x in items):
             rows = []
-            for item in raw:
+            for item in items:
                 if not isinstance(item, dict):
                     continue
                 rows.append({
@@ -699,20 +858,15 @@ class DataLoader:
             return pd.DataFrame(rows, columns=["blockCode", "blockName"])
 
         # list_type=0: industry boards — plain strings, need name resolution
-        code_list = [c for c in raw if c]
+        code_list = [c for c in items if isinstance(c, str) and c]
         name_map = self._resolve_sector_names(code_list)
-
-        rows = []
-        for code in code_list:
-            rows.append({
-                "blockCode": code,
-                "blockName": name_map.get(code, ""),
-            })
+        rows = [
+            {"blockCode": c, "blockName": name_map.get(c, "")} for c in code_list
+        ]
         df = pd.DataFrame(rows, columns=["blockCode", "blockName"])
         return df[df["blockName"] != ""]
 
     def _resolve_sector_names(self, codes: List[str]) -> Dict[str, str]:
-        """Fetch ``Name`` via ``get_stock_info`` for each sector code."""
         name_map: Dict[str, str] = {}
         for code in codes:
             info = self.get_stock_info(code)
@@ -746,24 +900,7 @@ class DataLoader:
                 "listType": list_type,
             },
         )
-        if not isinstance(raw, list) or not raw:
-            return pd.DataFrame(columns=["stockCode", "stockName"])
-
-        if list_type == 0:
-            return pd.DataFrame(
-                {"stockCode": [c for c in raw if c]},
-                columns=["stockCode", "stockName"],
-            )
-
-        rows = []
-        for item in raw:
-            if not isinstance(item, dict):
-                continue
-            rows.append({
-                "stockCode": item.get("Code", item.get("code", "")),
-                "stockName": item.get("Name", item.get("name", "")),
-            })
-        return pd.DataFrame(rows, columns=["stockCode", "stockName"])
+        return self._parse_list_payload(raw, list_type)
 
     def get_stock_sectors(self, stock_code: str) -> List[Tuple[str, str, str]]:
         """Return all sector memberships for a stock.
@@ -779,7 +916,7 @@ class DataLoader:
         if not isinstance(raw, dict):
             return []
 
-        items = raw.get("Value", raw) if isinstance(raw, dict) else []
+        items = raw.get("Value", raw.get("Data", []))
         if not isinstance(items, list):
             return []
 
@@ -802,8 +939,10 @@ class DataLoader:
         """Return the market-wide up/down stock count.
 
         Returns:
-            Dict with fields such as ``UpHome`` (上涨家数) and
-            ``DownHome`` (下跌家数) for indices, or None if unavailable.
+            Dict with sub-dicts per market (``Shanghai``, ``Shenzhen``,
+            ``Beijing``, ``Total``) and the per-market ``UpHome`` /
+            ``DownHome`` (上涨家数 / 下跌家数) counts, or None if
+            unavailable.
         """
         return self._call_tool("get_market_updown_count", {})
 
@@ -830,13 +969,19 @@ class DataLoader:
             Dict of field -> value, or None if unavailable.
         """
         raw = self._call_tool("get_more_info", {"stockCode": stock_code})
-        if not isinstance(raw, dict) or raw.get("ErrorId") not in (None, "0"):
+        if not isinstance(raw, dict):
+            return None
+        # The upgraded server nests the metric dict under ``Value`` while
+        # still echoing ``ErrorId`` at the top level.
+        if "Value" in raw and isinstance(raw["Value"], dict):
+            return raw["Value"]
+        if str(raw.get("ErrorId", "")) not in ("", "0"):
             return None
         raw.pop("ErrorId", None)
         return raw
 
     # ------------------------------------------------------------------
-    # Block-level trading data
+    # Block / market / stock / sector value queries (upgraded payload shape)
     # ------------------------------------------------------------------
 
     def get_bkjy_value(
@@ -849,25 +994,28 @@ class DataLoader:
         """Return sector-level trading metrics over time.
 
         Key fields:
-        ``BK05`` (市盈率TTM), ``BK06`` (市净率MRQ),
-        ``BK07`` (市销率TTM), ``BK08`` (市现率TTM),
-        ``BK09`` (涨跌数), ``BK10`` (板块总市值),
+        ``BK5`` (市盈率TTM), ``BK6`` (市净率MRQ),
+        ``BK7`` (市销率TTM), ``BK8`` (市现率TTM),
+        ``BK9`` (涨跌数), ``BK10`` (板块总市值),
         ``BK11`` (板块流通市值), ``BK12`` (涨停数),
         ``BK15`` (融资融券), ``BK16`` (陆股通资金流入).
 
+        The upgraded server strips the leading zero from the field name
+        (``BK05`` → ``BK5``) and returns each field as a list of
+        ``{Date, Value: [scalar_per_stock]}`` records.
+
         Args:
             block_codes: List of sector codes, e.g. ``["881386.SH"]``.
-            field_list: List of field names, e.g. ``["BK05", "BK06", "BK09"]``.
+            field_list: List of field names, e.g. ``["BK5", "BK6", "BK9"]``.
             start_date: Start date in ``YYYYMMDD`` or ``YYYY-MM-DD``.
             end_date: End date in ``YYYYMMDD`` or ``YYYY-MM-DD``.
 
         Returns:
-            DataFrame with multi-index (date, blockCode) and one column per
-            field name.
+            DataFrame with ``trade_date`` index and one column per
+            ``(blockCode, field)`` combination.
         """
         start = (start_date or "").replace("-", "")
         end = (end_date or "").replace("-", "")
-
         raw = self._call_tool(
             "get_bkjy_value",
             {
@@ -877,7 +1025,29 @@ class DataLoader:
                 "endTime": end,
             },
         )
-        return self._parse_market_data(raw, block_codes, field_list)
+        return self._parse_value_payload(raw, block_codes, field_list)
+
+    def get_bkjy_value_by_date(
+        self,
+        block_codes: List[str],
+        field_list: List[str],
+        year: int = 0,
+        mmdd: int = 0,
+    ) -> pd.DataFrame:
+        """Return sector-level metrics anchored to a specific date.
+
+        ``year=0``/``mmdd=0`` is the server's "latest" sentinel.
+        """
+        raw = self._call_tool(
+            "get_bkjy_value_by_date",
+            {
+                "stockList": block_codes,
+                "fieldList": field_list,
+                "year": year,
+                "mmdd": mmdd,
+            },
+        )
+        return self._parse_value_payload(raw, block_codes, field_list)
 
     def get_scjy_value(
         self,
@@ -892,18 +1062,9 @@ class DataLoader:
         ``SC03`` (沪深京涨停股个数), ``SC04`` (沪深京跌停股个数),
         ``SC09`` (沪月新开A股账户), ``SC28`` (历史A股新高新低数),
         ``SC31`` (涨跌家数), ``SC33`` (市场总封单金额).
-
-        Args:
-            field_list: List of field names, e.g. ``["SC01", "SC02"]``.
-            start_date: Start date in ``YYYYMMDD`` or ``YYYY-MM-DD``.
-            end_date: End date in ``YYYYMMDD`` or ``YYYY-MM-DD``.
-
-        Returns:
-            DataFrame with ``trade_date`` index and one column per field.
         """
         start = (start_date or "").replace("-", "")
         end = (end_date or "").replace("-", "")
-
         raw = self._call_tool(
             "get_scjy_value",
             {
@@ -912,61 +1073,359 @@ class DataLoader:
                 "endTime": end,
             },
         )
-        return self._parse_market_data(raw, ["SC"], field_list)
+        return self._parse_value_payload(raw, ["SC"], field_list)
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    def _parse_market_data(
+    def get_scjy_value_by_date(
         self,
-        raw: Optional[Any],
+        field_list: List[str],
+        year: int = 0,
+        mmdd: int = 0,
+    ) -> pd.DataFrame:
+        """Return market-wide metrics anchored to a specific date."""
+        raw = self._call_tool(
+            "get_scjy_value_by_date",
+            {
+                "fieldList": field_list,
+                "year": year,
+                "mmdd": mmdd,
+            },
+        )
+        return self._parse_value_payload(raw, ["SC"], field_list)
+
+    def get_gpjy_value(
+        self,
+        stock_codes: List[str],
+        field_list: List[str],
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> pd.DataFrame:
+        """Return per-stock operating metrics over time.
+
+        Key fields: ``GP01``–``GPnn`` (见 TDX 经营数据字典).
+        """
+        start = (start_date or "").replace("-", "")
+        end = (end_date or "").replace("-", "")
+        raw = self._call_tool(
+            "get_gpjy_value",
+            {
+                "stockList": stock_codes,
+                "fieldList": field_list,
+                "startTime": start,
+                "endTime": end,
+            },
+        )
+        return self._parse_value_payload(raw, stock_codes, field_list)
+
+    def get_gpjy_value_by_date(
+        self,
+        stock_codes: List[str],
+        field_list: List[str],
+        year: int = 0,
+        mmdd: int = 0,
+    ) -> pd.DataFrame:
+        """Return per-stock operating metrics anchored to a specific date."""
+        raw = self._call_tool(
+            "get_gpjy_value_by_date",
+            {
+                "stockList": stock_codes,
+                "fieldList": field_list,
+                "year": year,
+                "mmdd": mmdd,
+            },
+        )
+        return self._parse_value_payload(raw, stock_codes, field_list)
+
+    def get_financial_data(
+        self,
+        stock_codes: List[str],
+        field_list: List[str],
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> pd.DataFrame:
+        """Return professional financial data for one or more stocks.
+
+        Key fields: ``FN001``–``FNnn`` (e.g. 净利润, 营收, ROE, 资产负债率).
+        """
+        start = (start_date or "").replace("-", "")
+        end = (end_date or "").replace("-", "")
+        raw = self._call_tool(
+            "get_financial_data",
+            {
+                "stockList": stock_codes,
+                "fieldList": field_list,
+                "startTime": start,
+                "endTime": end,
+            },
+        )
+        return self._parse_value_payload(raw, stock_codes, field_list)
+
+    def get_financial_data_by_date(
+        self,
+        stock_codes: List[str],
+        field_list: List[str],
+        year: int = 0,
+        mmdd: int = 0,
+    ) -> pd.DataFrame:
+        """Return professional financial data anchored to a specific date."""
+        raw = self._call_tool(
+            "get_financial_data_by_date",
+            {
+                "stockList": stock_codes,
+                "fieldList": field_list,
+                "year": year,
+                "mmdd": mmdd,
+            },
+        )
+        return self._parse_value_payload(raw, stock_codes, field_list)
+
+    def get_gp_one_data(
+        self,
+        stock_codes: List[str],
+        field_list: List[str],
+    ) -> pd.DataFrame:
+        """Return consensus / one-off data (``一致预期``).
+
+        Key fields: ``GO1`` (一致预期EPS), ``GO2`` (一致预期净利润).
+        """
+        raw = self._call_tool(
+            "get_gp_one_data",
+            {"stockList": stock_codes, "fieldList": field_list},
+        )
+        return self._parse_value_payload(raw, stock_codes, field_list)
+
+    def get_cb_info(self, stock_code: str) -> Optional[pd.DataFrame]:
+        """Return convertible bond info for a single bond code (e.g. ``113050.SH``)."""
+        raw = self._call_tool("get_cb_info", {"stockCode": stock_code})
+        if not isinstance(raw, dict):
+            return None
+        if isinstance(raw.get("Data"), list):
+            return pd.DataFrame(raw["Data"])
+        if isinstance(raw.get("Value"), list):
+            return pd.DataFrame(raw["Value"])
+        return None
+
+    def get_ipo_info(
+        self,
+        ipo_type: int = 0,
+        ipo_date: int = 0,
+    ) -> Optional[pd.DataFrame]:
+        """Return new-share subscription info.
+
+        Args:
+            ipo_type: ``0`` = all, ``1`` = today, ``2`` = this week, etc.
+                Refer to the TDX schema for the full mapping.
+            ipo_date: ``0`` for the default (latest), or a specific date in
+                ``YYYYMMDD`` form.
+        """
+        raw = self._call_tool(
+            "get_ipo_info", {"ipoType": ipo_type, "ipoDate": ipo_date}
+        )
+        if not isinstance(raw, dict):
+            return None
+        if isinstance(raw.get("Data"), list):
+            return pd.DataFrame(raw["Data"])
+        if isinstance(raw.get("Value"), list):
+            return pd.DataFrame(raw["Value"])
+        return None
+
+    def get_gb_info(
+        self,
+        stock_code: str,
+        date_list: Optional[List[str]] = None,
+        count: int = 1,
+    ) -> Optional[pd.DataFrame]:
+        """Return share-capital history (总股本/流通股本) for a stock.
+
+        Args:
+            stock_code: Full stock code, e.g. ``"600000.SH"``.
+            date_list: Specific dates to query (``YYYYMMDD``); if omitted, the
+                server uses ``count`` to page backward from today.
+            count: How many records to return (1 = latest).
+        """
+        args: Dict[str, Any] = {"stockCode": stock_code, "count": count}
+        if date_list:
+            args["dateList"] = date_list
+        raw = self._call_tool("get_gb_info", args)
+        if not isinstance(raw, dict):
+            return None
+        if isinstance(raw.get("Data"), list):
+            return pd.DataFrame(raw["Data"])
+        if isinstance(raw.get("Value"), list):
+            return pd.DataFrame(raw["Value"])
+        return None
+
+    # ------------------------------------------------------------------
+    # Cache / refresh
+    # ------------------------------------------------------------------
+
+    def refresh_cache(self) -> bool:
+        """Force-refresh all market caches on the TDX server.
+
+        Returns:
+            True on accepted request, False if the call failed.
+        """
+        raw = self._call_tool("refresh_cache", {})
+        return raw is not None
+
+    def refresh_kline(
+        self,
+        stock_codes: List[str],
+        period: str = "1d",
+    ) -> bool:
+        """Force-refresh the K-line cache for specific stocks."""
+        raw = self._call_tool(
+            "refresh_kline", {"stockList": stock_codes, "period": period}
+        )
+        return raw is not None
+
+    def download_financial_data(
+        self,
+        stock_codes: List[str],
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> bool:
+        """Trigger a server-side financial-data download (heavy operation)."""
+        args: Dict[str, Any] = {"stockList": stock_codes}
+        if start_date:
+            args["startTime"] = start_date.replace("-", "")
+        if end_date:
+            args["endTime"] = end_date.replace("-", "")
+        raw = self._call_tool("download_financial_data", args)
+        return raw is not None
+
+    # ------------------------------------------------------------------
+    # Client-action / user-block methods
+    # ------------------------------------------------------------------
+
+    def send_user_block(
+        self,
+        stocks: List[str],
+        block_code: str = "",
+        show: bool = False,
+    ) -> Optional[Any]:
+        """Send a self-selected stock block to the connected TDX client."""
+        return self._call_tool(
+            "send_user_block",
+            {"stocks": stocks, "blockCode": block_code, "show": show},
+        )
+
+    def send_message(self, message: str) -> Optional[Any]:
+        """Broadcast a text message to the connected TDX client."""
+        return self._call_tool("send_message", {"message": message})
+
+    def create_sector(self, block_code: str, block_name: str) -> Optional[Any]:
+        """Create a custom user-defined sector."""
+        return self._call_tool(
+            "create_sector", {"blockCode": block_code, "blockName": block_name}
+        )
+
+    def delete_sector(self, block_code: str) -> Optional[Any]:
+        """Delete a custom user-defined sector."""
+        return self._call_tool("delete_sector", {"blockCode": block_code})
+
+    def rename_sector(self, block_code: str, block_name: str) -> Optional[Any]:
+        """Rename a custom user-defined sector."""
+        return self._call_tool(
+            "rename_sector", {"blockCode": block_code, "blockName": block_name}
+        )
+
+    def clear_sector(self, block_code: str) -> Optional[Any]:
+        """Empty a custom user-defined sector (remove all constituents)."""
+        return self._call_tool("clear_sector", {"blockCode": block_code})
+
+    # ------------------------------------------------------------------
+    # Internal parser — handles the upgraded bkjy/scjy/gpjy/financial shape
+    # ------------------------------------------------------------------
+
+    def _parse_value_payload(
+        self,
+        raw: Any,
         codes: List[str],
         field_list: List[str],
     ) -> pd.DataFrame:
-        """Parse ``get_bkjy_value`` / ``get_scjy_value`` responses.
+        """Parse the multi-shape payload returned by the *_value tool family.
 
-        Both return the same dict-of-dicts format as ``get_market_data``:
-        ``{"ErrorId":"0","Data":{"880001.SH":{"Date":[...],"BK05":[...]}}}``.
+        Two observed shapes:
+
+        1. **Upgraded shape** — per-field record list::
+
+               {"Data": {"<code>": {"<field>": [{"Date": "20250101",
+                                                  "Value": [v1, v2, ...]},
+                                                 ...]}}}
+
+           Each ``Value`` element corresponds positionally to an entry in
+           ``stockList``; with a single stock, the array is a one-element
+           list containing the scalar value.
+
+        2. **Legacy shape** — single Date array + per-field arrays::
+
+               {"Data": {"<code>": {"Date": ["20250101", ...],
+                                    "<field>": [v, v, ...]}}}
+
+        This parser also handles the top-level ``Value`` wrapper that the
+        upgraded server occasionally uses (``get_more_info`` is a similar
+        case).
         """
-        if not isinstance(raw, dict):
+        if raw is None:
             return pd.DataFrame(columns=field_list)
 
-        error_id = raw.get("ErrorId", "0")
-        if error_id != "0":
+        # Error case
+        if isinstance(raw, dict) and str(raw.get("ErrorId", "")) not in ("", "0"):
             return pd.DataFrame(columns=field_list)
 
-        data = raw.get("Data", {})
-        if not isinstance(data, dict):
+        # Unwrap {Value: {...}} container (occurs in some *_value_by_date paths)
+        if isinstance(raw, dict) and isinstance(raw.get("Value"), (dict, list)):
+            return self._parse_value_payload(raw["Value"], codes, field_list)
+
+        data_section: Any = None
+        if isinstance(raw, dict):
+            data_section = raw.get("Data", raw.get("data"))
+        if not isinstance(data_section, dict):
             return pd.DataFrame(columns=field_list)
 
-        rows_dict: Dict[str, dict] = {}
+        rows_dict: Dict[Any, Dict[str, Any]] = {}
 
         for code in codes:
-            block_data = data.get(code)
+            block_data = data_section.get(code)
             if not isinstance(block_data, dict):
+                # bkjy_value may also be keyed by field at the top level
+                # (sector-wide single code), so look for the data block in
+                # any single-value key.
                 continue
 
-            dates = block_data.get("Date", [])
-            n = len(dates)
+            for field in field_list:
+                value = block_data.get(field, block_data.get(field.lower()))
 
-            for i, date_str in enumerate(dates):
-                if i >= n:
-                    break
-                try:
-                    dt = pd.to_datetime(str(date_str), format="%Y%m%d")
-                except Exception:
+                # Upgraded shape: list[{Date, Value: [scalar, ...]}]
+                if isinstance(value, list) and value and isinstance(value[0], dict):
+                    for record in value:
+                        if not isinstance(record, dict):
+                            continue
+                        date_str = record.get("Date", record.get("date", ""))
+                        try:
+                            dt = pd.to_datetime(str(date_str), format="%Y%m%d")
+                        except Exception:
+                            continue
+                        key = (dt, code)
+                        row = rows_dict.setdefault(key, {"trade_date": dt})
+                        scalar = self._first_scalar(record.get("Value"))
+                        row[f"{code}_{field}"] = scalar
                     continue
 
-                row_key = str(dt.date())
-                if row_key not in rows_dict:
-                    rows_dict[row_key] = {"trade_date": dt}
-
-                for field in field_list:
-                    arr = block_data.get(field, [])
-                    rows_dict[row_key][f"{code}_{field}"] = (
-                        float(arr[i]) if i < len(arr) else None
-                    )
+                # Legacy shape: flat array aligned with a sibling Date array
+                if isinstance(value, list):
+                    dates = block_data.get("Date", block_data.get("date", []))
+                    for i, date_str in enumerate(dates):
+                        if i >= len(value):
+                            break
+                        try:
+                            dt = pd.to_datetime(str(date_str), format="%Y%m%d")
+                        except Exception:
+                            continue
+                        key = (dt, code)
+                        row = rows_dict.setdefault(key, {"trade_date": dt})
+                        row[f"{code}_{field}"] = self._coerce_float(value[i])
+                    continue
 
         if not rows_dict:
             return pd.DataFrame(columns=field_list)
@@ -975,3 +1434,23 @@ class DataLoader:
         if "trade_date" in df.columns:
             df = df.sort_values("trade_date").set_index("trade_date")
         return df
+
+    @staticmethod
+    def _first_scalar(value: Any) -> Optional[float]:
+        """Return the first scalar from a ``Value`` array, dropping noise."""
+        if value is None:
+            return None
+        if isinstance(value, list):
+            if not value:
+                return None
+            return DataLoader._coerce_float(value[0])
+        return DataLoader._coerce_float(value)
+
+    @staticmethod
+    def _coerce_float(value: Any) -> Optional[float]:
+        if value is None or value == "":
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
