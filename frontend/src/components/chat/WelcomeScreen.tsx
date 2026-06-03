@@ -151,9 +151,9 @@ const CATEGORIES: Category[] = [
 ];
 
 const CAPABILITY_CHIPS = [
-  "77 Finance Skills",
-  "29 Swarm Presets",
-  "44 Agent Tools",
+  "Finance Skills Library",
+  "Swarm Agent Teams",
+  "Auto-Discovered Tools",
   "3 Markets: A-Share · Crypto · HK/US",
   "Trading Connector Profiles",
   "Minute to Daily Timeframes",

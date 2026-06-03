@@ -3640,6 +3640,8 @@ def cmd_connector_history(
     bar_size: str = "1 day",
     what_to_show: str = "TRADES",
     use_rth: bool = True,
+    period: str = "1d",
+    limit: int = 90,
 ) -> int:
     """Print historical bars from a connector profile."""
     from src.trading.service import get_history
@@ -3659,6 +3661,8 @@ def cmd_connector_history(
             bar_size=bar_size,
             what_to_show=what_to_show,
             use_rth=use_rth,
+            period=period,
+            limit=limit,
         )
     except Exception as exc:  # noqa: BLE001
         console.print(f"[red]Connector history failed:[/red] {exc}")
@@ -3852,6 +3856,8 @@ def _dispatch_connector(args: argparse.Namespace) -> int:
             bar_size=args.bar_size,
             what_to_show=args.what_to_show,
             use_rth=not args.no_rth,
+            period=args.period,
+            limit=args.bar_limit,
         )
     if sub == "authorize":
         return cmd_connector_authorize(args.profile)
@@ -4025,10 +4031,12 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_connector_profile_arg(connector_history)
     _add_connector_local(connector_history)
     _add_connector_contract(connector_history)
-    connector_history.add_argument("--duration", default="30 D")
-    connector_history.add_argument("--bar-size", dest="bar_size", default="1 day")
+    connector_history.add_argument("--duration", default="30 D", help="IBKR (local_tws) duration string")
+    connector_history.add_argument("--bar-size", dest="bar_size", default="1 day", help="IBKR (local_tws) bar size")
     connector_history.add_argument("--what-to-show", dest="what_to_show", default="TRADES")
     connector_history.add_argument("--no-rth", action="store_true", help="Include outside-regular-hours data when available")
+    connector_history.add_argument("--period", default="1d", help="Bar interval for SDK connectors: 1m/5m/15m/30m/1h/4h/1d/1w/1M")
+    connector_history.add_argument("--limit", dest="bar_limit", type=int, default=90, help="Number of bars for SDK connectors")
 
     for name, help_text in (
         ("start", "Start the selected live connector runner"),
@@ -4166,7 +4174,7 @@ _PROVIDER_CHOICES: list[dict[str, str | None]] = [
         "key_env": "MINIMAX_API_KEY",
         "base_env": "MINIMAX_BASE_URL",
         "base_url": "https://api.minimax.io/v1",
-        "model": "MiniMax-M2.7",
+        "model": "MiniMax-M3",
         "key_prefix": None,
         "key_placeholder": "api-key...",
     },

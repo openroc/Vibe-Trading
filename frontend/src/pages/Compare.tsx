@@ -5,6 +5,7 @@ import { api, type RunListItem, type RunData, type EquityPoint } from "@/lib/api
 import { echarts, CHART_GROUP, connectCharts } from "@/lib/echarts";
 import { getChartTheme } from "@/lib/chart-theme";
 import { useDarkMode } from "@/hooks/useDarkMode";
+import { SkeletonChart, SkeletonMetrics } from "@/components/common/Skeleton";
 
 interface MetricDef {
   key: string;
@@ -203,6 +204,8 @@ export function Compare() {
   const [rightData, setRightData] = useState<Record<string, number> | null>(null);
   const [leftCurve, setLeftCurve] = useState<EquityPoint[]>([]);
   const [rightCurve, setRightCurve] = useState<EquityPoint[]>([]);
+  const [leftLoading, setLeftLoading] = useState(false);
+  const [rightLoading, setRightLoading] = useState(false);
 
   useEffect(() => {
     api.listRuns().then((items) => {
@@ -214,10 +217,12 @@ export function Compare() {
 
   useEffect(() => {
     if (leftId) {
+      setLeftLoading(true);
       api.getRun(leftId).then((d: RunData) => {
         setLeftData(d.metrics || null);
         setLeftCurve(d.equity_curve || []);
-      }).catch(() => { setLeftData(null); setLeftCurve([]); });
+      }).catch(() => { setLeftData(null); setLeftCurve([]); })
+        .finally(() => setLeftLoading(false));
     } else {
       setLeftData(null);
       setLeftCurve([]);
@@ -226,10 +231,12 @@ export function Compare() {
 
   useEffect(() => {
     if (rightId) {
+      setRightLoading(true);
       api.getRun(rightId).then((d: RunData) => {
         setRightData(d.metrics || null);
         setRightCurve(d.equity_curve || []);
-      }).catch(() => { setRightData(null); setRightCurve([]); });
+      }).catch(() => { setRightData(null); setRightCurve([]); })
+        .finally(() => setRightLoading(false));
     } else {
       setRightData(null);
       setRightCurve([]);
@@ -238,6 +245,8 @@ export function Compare() {
 
   const leftRun = runs.find((r) => r.run_id === leftId);
   const rightRun = runs.find((r) => r.run_id === rightId);
+  const loading = leftLoading || rightLoading;
+  const hasData = Boolean(leftData || rightData);
 
   return (
     <div className="p-8 max-w-4xl space-y-6">
@@ -263,6 +272,19 @@ export function Compare() {
           </select>
         </div>
       </div>
+
+      {/* Loading state — show skeletons while a selected run's data is in flight */}
+      {loading && !hasData && (
+        <div className="space-y-6">
+          <div className="border rounded-xl p-4">
+            <h2 className="text-sm font-medium text-muted-foreground mb-2">Equity & Drawdown</h2>
+            <SkeletonChart height={320} />
+          </div>
+          <div className="border rounded-xl overflow-hidden">
+            <SkeletonMetrics />
+          </div>
+        </div>
+      )}
 
       {/* Equity curve overlay */}
       {(leftCurve.length > 0 || rightCurve.length > 0) && (
@@ -307,7 +329,7 @@ export function Compare() {
         </div>
       )}
 
-      {!leftData && !rightData && (
+      {!hasData && !loading && (
         <div className="text-center py-16 text-muted-foreground">
           <GitCompare className="h-12 w-12 mx-auto mb-3 opacity-20" />
           <p className="text-sm">Select two runs to compare their metrics.</p>

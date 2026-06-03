@@ -314,7 +314,7 @@ function BrowseView() {
           to="/alpha-zoo/bench"
           className="inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:opacity-90 transition"
         >
-          <Play className="h-3.5 w-3.5" aria-hidden="true" /> Run bench
+          <Play className="h-3.5 w-3.5" aria-hidden="true" /> Run benchmark
         </Link>
       </div>
 
@@ -338,8 +338,8 @@ function BrowseView() {
                 <th className="text-left px-4 py-2.5 text-muted-foreground hidden md:table-cell">
                   Universe
                 </th>
-                <th className="text-right px-4 py-2.5 text-muted-foreground">
-                  Decay
+                <th className="text-right px-4 py-2.5 text-muted-foreground" title="Predictive half-life: trading days before the signal's edge decays">
+                  Decay (days)
                 </th>
               </tr>
             </thead>
@@ -495,7 +495,7 @@ function DetailView({ alphaId }: DetailProps) {
           onClick={() => navigate(benchHref)}
           className="inline-flex items-center gap-2 px-3 py-1.5 rounded-md bg-primary text-primary-foreground text-xs font-medium hover:opacity-90 transition"
         >
-          <Play className="h-3.5 w-3.5" aria-hidden="true" /> Run bench
+          <Play className="h-3.5 w-3.5" aria-hidden="true" /> Run benchmark
         </button>
       </div>
 
@@ -714,7 +714,7 @@ function BenchView() {
 
       <div className="space-y-1">
         <div className="flex items-center gap-2 text-xs text-muted-foreground uppercase tracking-wide">
-          <Play className="h-3.5 w-3.5" aria-hidden="true" /> Bench runner
+          <Play className="h-3.5 w-3.5" aria-hidden="true" /> Benchmark runner
         </div>
         <h1 className="text-2xl md:text-3xl font-bold tracking-tight">
           Score a zoo on a universe
@@ -802,7 +802,7 @@ function BenchView() {
               </>
             ) : (
               <>
-                <Play className="h-3.5 w-3.5" aria-hidden="true" /> Run bench
+                <Play className="h-3.5 w-3.5" aria-hidden="true" /> Run benchmark
               </>
             )}
           </button>

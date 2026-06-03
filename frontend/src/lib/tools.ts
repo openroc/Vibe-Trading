@@ -18,7 +18,7 @@ export const TOOL_LABELS: Record<string, string> = {
   trading_orders: "Read connector orders",
   trading_quote: "Read connector quote",
   trading_history: "Read connector history",
-  compact: "Compact context",
+  compact: "Summarize conversation",
   create_task: "Create task",
   update_task: "Update task",
   spawn_subagent: "Spawn sub-agent",

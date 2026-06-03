@@ -6,8 +6,14 @@ import json
 from pathlib import Path
 
 from src.config.paths import get_runtime_root
+from src.trading.connectors.alpaca.profiles import ALPACA_PROFILES
+from src.trading.connectors.binance.profiles import BINANCE_PROFILES
+from src.trading.connectors.futu.profiles import FUTU_PROFILES
 from src.trading.connectors.ibkr.profiles import IBKR_PROFILES
+from src.trading.connectors.longbridge.profiles import LONGBRIDGE_PROFILES
+from src.trading.connectors.okx.profiles import OKX_PROFILES
 from src.trading.connectors.robinhood.profiles import ROBINHOOD_PROFILES
+from src.trading.connectors.tiger.profiles import TIGER_PROFILES
 from src.trading.types import TradingProfile
 
 CONFIG_FILENAME = "trading-connections.json"
@@ -16,6 +22,12 @@ DEFAULT_PROFILE_ID = "ibkr-paper-local"
 BUILTIN_PROFILES: tuple[TradingProfile, ...] = (
     *IBKR_PROFILES,
     *ROBINHOOD_PROFILES,
+    *TIGER_PROFILES,
+    *LONGBRIDGE_PROFILES,
+    *ALPACA_PROFILES,
+    *OKX_PROFILES,
+    *BINANCE_PROFILES,
+    *FUTU_PROFILES,
 )
 
 

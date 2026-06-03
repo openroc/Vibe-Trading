@@ -55,12 +55,10 @@ from src.live.extractors import get_extractor
 from src.live.halt import halt_flag_set
 from src.live.mandate.model import MANDATE_SCHEMA_VERSION, Mandate
 from src.live.mandate.store import load_mandate
-from src.live.paths import broker_dir
+from src.live.daily_count import increment_daily_count, read_daily_count
 from src.tools.mcp import MCPRemoteTool, MCPRemoteToolSpec, MCPServerAdapter
 
 logger = logging.getLogger(__name__)
-
-_COUNTER_FILENAME = "trade_counter.json"
 
 #: Frozen marker key the api_server SSE relay reads off the returned tool_result
 #: to emit a ``live.action`` event without touching the agent loop.
@@ -485,43 +483,13 @@ class LiveOrderGuardTool(MCPRemoteTool):
 
     # -- daily counter ------------------------------------------------------
 
-    def _counter_path(self):
-        """Return the per-broker ``trade_counter.json`` path."""
-        return broker_dir(self.broker) / _COUNTER_FILENAME
-
     def _read_daily_count(self) -> int:
-        """Return today's order count from the persisted counter (UTC rollover).
-
-        A missing/unreadable counter, or one stamped with a previous UTC date,
-        reads as ``0``. Parse failure reads as ``0`` (the count is advisory; the
-        broker enforces the hard ceiling).
-        """
-        path = self._counter_path()
-        if not path.is_file():
-            return 0
-        try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return 0
-        if not isinstance(raw, dict) or raw.get("date") != _utc_today():
-            return 0
-        try:
-            return int(raw.get("count", 0))
-        except (TypeError, ValueError):
-            return 0
+        """Return today's order count via the shared per-broker counter."""
+        return read_daily_count(self.broker)
 
     def _increment_daily_count(self) -> None:
-        """Persist today's incremented order count (UTC rollover, atomic write)."""
-        today = _utc_today()
-        count = self._read_daily_count() + 1
-        path = self._counter_path()
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        tmp = path.with_name(f".{path.name}.tmp")
-        tmp.write_text(
-            json.dumps({"date": today, "count": count}, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        tmp.replace(path)
+        """Increment today's order count via the shared per-broker counter."""
+        increment_daily_count(self.broker)
 
     # -- audit + misc -------------------------------------------------------
 
@@ -719,11 +687,6 @@ def _price_from_quote_dict(quote: dict) -> float | None:
             if value == value and value > 0:  # finite + positive
                 return value
     return None
-
-
-def _utc_today() -> str:
-    """Return today's UTC calendar date as ``YYYY-MM-DD``."""
-    return datetime.now(timezone.utc).date().isoformat()
 
 
 def _describe_intent(intent: OrderIntent | None) -> str | None:

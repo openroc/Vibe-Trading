@@ -23,16 +23,30 @@ from src.live.classification import ToolClass, classify_tool
 from src.live.halt import halt_flag_set
 from src.live.order_guard import LiveOrderGuardTool
 from src.tools.mcp import MCPRemoteTool
+from src.trading.connectors.alpaca.classification import ALPACA_TOOL_CLASS
+from src.trading.connectors.binance.classification import BINANCE_TOOL_CLASS
+from src.trading.connectors.futu.classification import FUTU_TOOL_CLASS
 from src.trading.connectors.ibkr.classification import IBKR_TOOL_CLASS
+from src.trading.connectors.longbridge.classification import LONGBRIDGE_TOOL_CLASS
+from src.trading.connectors.okx.classification import OKX_TOOL_CLASS
 from src.trading.connectors.robinhood.classification import ROBINHOOD_TOOL_CLASS
+from src.trading.connectors.tiger.classification import TIGER_TOOL_CLASS
 
 logger = logging.getLogger(__name__)
 
 #: Per-broker curated classification maps (Tier 2). Keyed by broker name; an
-#: aliased server key resolves to its broker via :func:`_broker_for`.
+#: aliased server key resolves to its broker via :func:`_broker_for`. Order-
+#: mutating ops are pinned WRITE so the live gate fails closed; an op absent
+#: from its broker map and not annotated read-only resolves to UNKNOWN → WRITE.
 _BROKER_CURATED_MAPS = {
     "robinhood": ROBINHOOD_TOOL_CLASS,
     "ibkr": IBKR_TOOL_CLASS,
+    "tiger": TIGER_TOOL_CLASS,
+    "longbridge": LONGBRIDGE_TOOL_CLASS,
+    "alpaca": ALPACA_TOOL_CLASS,
+    "okx": OKX_TOOL_CLASS,
+    "binance": BINANCE_TOOL_CLASS,
+    "futu": FUTU_TOOL_CLASS,
 }
 
 

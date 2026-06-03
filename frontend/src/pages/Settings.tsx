@@ -382,6 +382,7 @@ export function Settings() {
                 <option value="high">high</option>
                 <option value="max">max</option>
               </select>
+              <span className={hintClass}>{"How hard the model thinks before answering. Higher is more thorough but slower; leave Off for fastest replies."}</span>
             </label>
 
             <div className="rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">

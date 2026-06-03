@@ -57,7 +57,11 @@ class UniverseDataUnavailable(Exception):
 _ASSET_CLASS_MARKET: dict[AssetClass, str] = {
     AssetClass.US_EQUITY: "us_equity",
     AssetClass.US_ETF: "us_equity",
+    AssetClass.HK_EQUITY: "hk_equity",
     AssetClass.CRYPTO: "crypto",
+    # CN_EQUITY has no loader market wired here, so market-cap / liquidity floors
+    # for A-shares fail closed (deny) rather than wave through — intentional. If
+    # ever wired, the registry's A-share market key is "a_share" (not "cn_equity").
 }
 
 #: Breach ``kind`` values. ``universe``/``instrument`` are structural (DENY);
@@ -103,6 +107,12 @@ class OrderIntent:
         notional_usd: Order notional in USD when derivable.
         quantity: Share/contract/coin quantity when notional is not given.
         instrument_type: Mapped :class:`~src.live.mandate.model.InstrumentType`.
+        asset_class: Explicit universe :class:`~src.live.mandate.model.AssetClass`
+            when the caller can determine the market (multi-market connectors:
+            an ``EQUITY`` may be US, HK or A-share). When ``None`` the gate falls
+            back to the instrument-type default (US-centric), preserving the
+            single-market behavior. Carrying it explicitly is what lets the
+            mandate gate distinguish e.g. an HK equity from a US equity.
     """
 
     symbol: str
@@ -110,6 +120,7 @@ class OrderIntent:
     notional_usd: float | None
     quantity: float | None
     instrument_type: InstrumentType
+    asset_class: AssetClass | None = None
 
 
 @dataclass(frozen=True)
@@ -430,8 +441,10 @@ def check_mandate(
         )
 
     # 3. Asset-class allowance (universe bucket). OPTION has no bucket and is
-    #    governed by allowed_instruments alone.
-    asset_class = _INSTRUMENT_ASSET_CLASS.get(intent.instrument_type)
+    #    governed by allowed_instruments alone. An explicit intent.asset_class
+    #    (multi-market connectors: US/HK/CN equities) wins over the instrument
+    #    default so the gate buckets HK/A-share correctly.
+    asset_class = intent.asset_class or _INSTRUMENT_ASSET_CLASS.get(intent.instrument_type)
     if asset_class is not None and asset_class not in universe.asset_classes:
         return _breach(
             broker=broker, remote_tool=remote_tool, intent=intent,

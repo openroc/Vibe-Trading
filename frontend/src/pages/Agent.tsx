@@ -1190,8 +1190,8 @@ export function Agent() {
                   </span>
                 )}
                 {goalProgress.evidenceTotal > 0 && (
-                  <span className="shrink-0 rounded bg-background px-1 font-mono text-[10px] text-primary">
-                    {goalProgress.evidenceTotal} ev
+                  <span className="shrink-0 rounded bg-background px-1 font-mono text-[10px] text-primary" title="Evidence collected toward this research goal">
+                    {goalProgress.evidenceTotal} evidence
                   </span>
                 )}
                 <ChevronDown

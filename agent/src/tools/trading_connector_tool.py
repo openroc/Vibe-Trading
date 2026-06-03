@@ -17,12 +17,14 @@ from src.trading.profiles import (
     save_selected_profile_id,
 )
 from src.trading.service import (
+    cancel_order,
     check_connection,
     get_account,
     get_history,
     get_open_orders,
     get_positions,
     get_quote,
+    place_order,
 )
 
 
@@ -41,6 +43,12 @@ def _int_or_none(value: Any) -> int | None:
     if value in (None, ""):
         return None
     return int(value)
+
+
+def _num_or_none(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    return float(value)
 
 
 TRADING_COMMON_PARAMETERS = {
@@ -260,10 +268,16 @@ class TradingHistoryTool(BaseTool):
         "type": "object",
         "properties": {
             **TradingQuoteTool.parameters["properties"],
-            "duration": {"type": "string", "default": "30 D"},
-            "bar_size": {"type": "string", "default": "1 day"},
+            "duration": {"type": "string", "default": "30 D", "description": "IBKR (local_tws) duration string."},
+            "bar_size": {"type": "string", "default": "1 day", "description": "IBKR (local_tws) bar size."},
             "what_to_show": {"type": "string", "default": "TRADES"},
             "use_rth": {"type": "boolean", "default": True},
+            "period": {
+                "type": "string",
+                "default": "1d",
+                "description": "Bar interval for SDK connectors (broker_sdk): 1m/5m/15m/30m/1h/4h/1d/1w/1M.",
+            },
+            "limit": {"type": "integer", "default": 90, "description": "Number of bars for SDK connectors."},
         },
         "required": ["symbol"],
     }
@@ -284,6 +298,93 @@ class TradingHistoryTool(BaseTool):
                     bar_size=str(kwargs.get("bar_size") or "1 day"),
                     what_to_show=str(kwargs.get("what_to_show") or "TRADES"),
                     use_rth=bool(kwargs.get("use_rth", True)),
+                    period=str(kwargs.get("period") or "1d"),
+                    limit=int(kwargs.get("limit") or 90),
+                    **_overrides(kwargs),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _json_result({"status": "error", "error": str(exc)})
+
+
+class TradingPlaceOrderTool(BaseTool):
+    """Place an order through a trading connector profile.
+
+    Paper profiles place against the broker's sandbox account. Live profiles
+    route through the bounded-autonomy mandate gate (mandate + kill switch +
+    fail-closed pre-trade checks + audit) before any order reaches the broker.
+    Not read-only; not repeatable (an order must never be silently re-issued).
+    """
+
+    name = "trading_place_order"
+    description = (
+        "Place an order through the selected trading connector profile. Paper "
+        "profiles trade a sandbox account; live profiles are gated by the user's "
+        "mandate and kill switch. side is 'buy' or 'sell'; give exactly one of "
+        "quantity (units) or notional (account-currency amount)."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            **TRADING_COMMON_PARAMETERS,
+            "symbol": {"type": "string", "description": "Symbol, e.g. AAPL, BTC-USDT, 700.HK, HK.00700."},
+            "side": {"type": "string", "enum": ["buy", "sell"]},
+            "quantity": {"type": "number", "description": "Order size in units/shares/contracts. Exactly one of quantity/notional."},
+            "notional": {"type": "number", "description": "Order size as an account-currency amount. Exactly one of quantity/notional."},
+            "order_type": {"type": "string", "enum": ["market", "limit"], "default": "market"},
+            "limit_price": {"type": "number", "description": "Required for limit orders."},
+            "time_in_force": {"type": "string", "enum": ["day", "gtc"], "default": "day"},
+        },
+        "required": ["symbol", "side"],
+    }
+    repeatable = False
+    is_readonly = False
+
+    def execute(self, **kwargs: Any) -> str:
+        """Place an order via the connector profile."""
+        try:
+            return _json_result(
+                place_order(
+                    str(kwargs["symbol"]),
+                    _connection(kwargs.get("connection")),
+                    side=str(kwargs.get("side") or ""),
+                    quantity=_num_or_none(kwargs.get("quantity")),
+                    notional=_num_or_none(kwargs.get("notional")),
+                    order_type=str(kwargs.get("order_type") or "market"),
+                    limit_price=_num_or_none(kwargs.get("limit_price")),
+                    time_in_force=str(kwargs.get("time_in_force") or "day"),
+                    **_overrides(kwargs),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _json_result({"status": "error", "error": str(exc)})
+
+
+class TradingCancelOrderTool(BaseTool):
+    """Cancel an order through a trading connector profile (risk-reducing)."""
+
+    name = "trading_cancel_order"
+    description = "Cancel an open order on the selected trading connector profile by order id."
+    parameters = {
+        "type": "object",
+        "properties": {
+            **TRADING_COMMON_PARAMETERS,
+            "order_id": {"type": "string", "description": "Broker order id to cancel."},
+            "symbol": {"type": "string", "description": "Symbol (required by some brokers, e.g. OKX/Binance)."},
+        },
+        "required": ["order_id"],
+    }
+    repeatable = False
+    is_readonly = False
+
+    def execute(self, **kwargs: Any) -> str:
+        """Cancel an order via the connector profile."""
+        try:
+            return _json_result(
+                cancel_order(
+                    str(kwargs["order_id"]),
+                    _connection(kwargs.get("connection")),
+                    symbol=_connection(kwargs.get("symbol")),
                     **_overrides(kwargs),
                 )
             )
