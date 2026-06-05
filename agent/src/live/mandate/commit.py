@@ -7,7 +7,7 @@ is a plain function the API surface (``POST /mandate/commit``) calls when a user
 picks a profile. The agent loop has no reference to :func:`commit_mandate`, so
 even a compromised/hallucinating model cannot self-authorize a mandate — the
 only code path that writes one requires the surface-originated ``consent_ack``
-the model never produces (see ``docs/live-trading/SPEC.md`` §3 trust invariant,
+the model never produces (see the live-trading SPEC §3 trust invariant,
 Consent §1, Mandate §2). This is the 命门 invariant: a structural guarantee,
 not a prompt-level one.
 

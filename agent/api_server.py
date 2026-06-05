@@ -2277,7 +2277,7 @@ async def retry_swarm_run(run_id: str, http_request: Request):
 # ============================================================================
 #
 # These are the privileged SURFACE actions of the live-trading channel
-# (docs/live-trading/SPEC.md, Consent §1/§3/§4). None is an agent tool:
+# (live-trading SPEC, Consent §1/§3/§4). None is an agent tool:
 #   - POST /mandate/commit  -> the single mandate writer (commit_mandate)
 #   - POST /live/halt       -> trip the kill switch (P5 trip_halt)
 #   - POST /live/resume     -> clear the kill switch (P5 clear_halt)

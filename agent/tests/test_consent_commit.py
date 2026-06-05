@@ -1,6 +1,6 @@
 """Consent backend: propose -> select -> commit state machine + invariants.
 
-Covers (docs/live-trading/SPEC.md Consent §1/§3, Mandate §2):
+Covers (live-trading SPEC, Consent §1/§3, Mandate §2):
 
 * PROPOSE -> SELECT -> COMMIT happy path, then the mandate loads back.
 * commit-is-the-only-write: an AST + registry scan proves no agent tool / tool
