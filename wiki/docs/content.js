@@ -29,9 +29,9 @@ export const DOCS_STRUCTURE = [
           },
           {
             id: "research-only",
-            title: "Research only",
+            title: "Boundaries",
             body: `
-              <p>Vibe-Trading does not execute live trades. It is designed for simulation, backtesting, audit trails, and research workflows. Outputs are not investment advice.</p>
+              <p>Vibe-Trading is built for research, simulation, backtesting, and audit trails. Any live trading is opt-in and read-only by default — it runs only through a broker you authorize yourself (e.g. Robinhood Agentic Trading), within the limits you set, and you can halt it instantly. It holds no funds, runs no execution venue, and is not investment advice.</p>
             `
           },
           {
