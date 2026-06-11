@@ -1,7 +1,12 @@
 ---
 name: vibe-trading
+<<<<<<< HEAD
 version: 0.1.9
 description: Professional finance research toolkit — backtesting (7 engines + benchmark comparison panel), factor analysis, Alpha Zoo (452 pre-built alphas across qlib158/alpha101/gtja191/academic), options pricing, 77 finance skills, 29 multi-agent swarm teams, Trade Journal analyzer, and Shadow Account (extract → backtest → render) across 7 data sources (tushare, yfinance, okx, akshare, mootdx, ccxt, futu).
+=======
+version: 0.1.8
+description: Professional finance research toolkit — backtesting (7 engines + benchmark comparison panel), factor analysis, Alpha Zoo (452 pre-built alphas across qlib158/alpha101/gtja191/academic), options pricing, 75 finance skills, 29 multi-agent swarm teams, Trade Journal analyzer, and Shadow Account (extract → backtest → render) across 8 data sources (tdx, internal, tushare, yfinance, okx, akshare, ccxt, futu).
+>>>>>>> feat(loaders): register TDX loader, wire into A-share fallback chain, update docs
 dependencies:
   python: ">=3.11"
   pip:
@@ -73,7 +78,11 @@ Feed a CSV broker export (同花顺 / 东财 / 富途 / generic), and the agent 
 5. `scan_shadow_signals` — list today's symbols that match your shadow's entry cadence (research only).
 
 ### Backtesting
+<<<<<<< HEAD
 Create and run quantitative strategies across 7 engines (ChinaA, GlobalEquity, Crypto, ChinaFutures, GlobalFutures, Forex + options) with 7 data sources:
+=======
+Create and run quantitative strategies across 7 engines (ChinaA, GlobalEquity, Crypto, ChinaFutures, GlobalFutures, Forex + options) with 8 data sources:
+>>>>>>> feat(loaders): register TDX loader, wire into A-share fallback chain, update docs
 - **HK/US equities** via yfinance (free, no API key)
 - **Cryptocurrency** via OKX or CCXT/100+ exchanges (free, no API key)
 - **China A-shares** via Tushare (token) or AKShare (free fallback)

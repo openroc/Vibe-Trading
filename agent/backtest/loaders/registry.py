@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Type
 
-from backtest.loaders.base import NoAvailableSourceError
+from agent.backtest.loaders.base import NoAvailableSourceError
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +64,7 @@ def _ensure_registered() -> None:
     _registered = True
 
     _loader_modules = [
+<<<<<<< HEAD
         "backtest.loaders.tushare",
         "backtest.loaders.internal_loader",
         "backtest.loaders.okx",
@@ -72,6 +73,16 @@ def _ensure_registered() -> None:
         "backtest.loaders.mootdx_loader",
         "backtest.loaders.ccxt_loader",
         "backtest.loaders.futu",
+=======
+        "agent.backtest.loaders.tushare",
+        "agent.backtest.loaders.internal_loader",
+        "agent.backtest.loaders.okx",
+        "agent.backtest.loaders.yfinance_loader",
+        "agent.backtest.loaders.akshare_loader",
+        "agent.backtest.loaders.ccxt_loader",
+        "agent.backtest.loaders.futu",
+        "agent.backtest.loaders.tdx_loader",
+>>>>>>> feat(loaders): register TDX loader, wire into A-share fallback chain, update docs
     ]
     import importlib
     for mod in _loader_modules:
@@ -87,10 +98,14 @@ def _ensure_registered() -> None:
 
 FALLBACK_CHAINS: dict[str, list[str]] = {
 <<<<<<< HEAD
+<<<<<<< HEAD
     "a_share":   ["tushare", "mootdx", "akshare"],
 =======
     "a_share":   ["tushare", "internal", "akshare"],
 >>>>>>> feat(loader): add internal network A-share loader
+=======
+    "a_share":   ["tdx", "tushare", "internal", "akshare"],
+>>>>>>> feat(loaders): register TDX loader, wire into A-share fallback chain, update docs
     "us_equity": ["yfinance", "akshare"],
     "hk_equity": ["yfinance", "futu", "akshare"],
     "crypto":    ["okx", "ccxt", "yfinance"],

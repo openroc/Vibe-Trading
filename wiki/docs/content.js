@@ -224,6 +224,8 @@ vibe-trading --swarm-run investment_committee '{"topic":"BTC outlook"}'</code></
             title: "Providers",
             body: `
               <ul>
+                <li>TDX for China A-shares via MCP server (fast, internal network).</li>
+                <li>Internal API for A-shares, US equities, and crypto (internal network).</li>
                 <li>Tushare for China market and fundamental workflows when configured.</li>
                 <li>OKX and CCXT for crypto symbols such as <code>BTC-USDT</code>.</li>
                 <li>yfinance for global equities and common benchmarks.</li>
