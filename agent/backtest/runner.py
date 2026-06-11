@@ -28,6 +28,7 @@ except ImportError:
 from backtest.loaders.registry import (
     FALLBACK_CHAINS,
     LOADER_REGISTRY,
+    VALID_SOURCES,
     get_loader_cls_with_fallback,
     resolve_loader,
 )
@@ -47,7 +48,6 @@ logger = logging.getLogger(__name__)
 
 _VALID_INTERVALS = {"1m", "5m", "15m", "30m", "1H", "4H", "1D"}
 _VALID_ENGINES = {"daily", "options"}
-_VALID_SOURCES = {"tushare", "okx", "yfinance", "akshare", "ccxt", "auto"}
 
 
 class BacktestConfigSchema(BaseModel):
@@ -98,8 +98,8 @@ class BacktestConfigSchema(BaseModel):
     @field_validator("source")
     @classmethod
     def valid_source(cls, v: str) -> str:
-        if v not in _VALID_SOURCES:
-            raise ValueError(f"unsupported source {v!r}, must be one of {_VALID_SOURCES}")
+        if v not in VALID_SOURCES:
+            raise ValueError(f"unsupported source {v!r}, must be one of {VALID_SOURCES}")
         return v
 
     @field_validator("fundamental_fields")

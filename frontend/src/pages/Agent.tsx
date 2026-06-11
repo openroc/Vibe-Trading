@@ -4,7 +4,7 @@ import { Send, Loader2, ArrowDown, Square, Download, Plus, Paperclip, X, Users, 
 import { toast } from "sonner";
 import { useAgentStore } from "@/stores/agent";
 import { useSSE } from "@/hooks/useSSE";
-import { ApiError, api, type GoalSnapshot, type MandateProposal, type MandateCommitted, type LiveAction, type LiveHalted, type LiveStatus } from "@/lib/api";
+import { ApiError, AUTH_REQUIRED_MESSAGE, api, isAuthRequiredError, type GoalSnapshot, type MandateProposal, type MandateCommitted, type LiveAction, type LiveHalted, type LiveStatus } from "@/lib/api";
 import { isReportWorthyRun } from "@/lib/runReports";
 import type { AgentMessage, ToolCallEntry } from "@/types/agent";
 import { AgentAvatar } from "@/components/chat/AgentAvatar";
@@ -15,6 +15,12 @@ import { ConversationTimeline } from "@/components/chat/ConversationTimeline";
 import { ToolProgressIndicator } from "@/components/chat/ToolProgressIndicator";
 import { MandateProposalCard } from "@/components/chat/MandateProposalCard";
 import { RunnerStatus } from "@/components/chat/RunnerStatus";
+import { SwarmStatusCard } from "@/components/chat/SwarmStatusCard";
+import {
+  applySwarmEvent,
+  buildSwarmStatusFromStarted,
+  buildSwarmStatusFromToolResultPreview,
+} from "@/lib/swarmStatus";
 
 /* ---------- Message grouping ---------- */
 type MsgGroup =
@@ -431,6 +437,12 @@ export function Agent() {
           elapsed_s: undefined,
           progress: undefined,
         });
+        if (toolName === "run_swarm") {
+          const fallback = buildSwarmStatusFromToolResultPreview(String(d.preview || ""));
+          if (fallback && !act().messages.some((m) => m.type === "swarm_status" && m.swarmRunId === fallback.runId)) {
+            act().upsertSwarmStatus(fallback);
+          }
+        }
       },
 
       tool_heartbeat: (d) => {
@@ -562,6 +574,24 @@ export function Agent() {
       "goal.created": () => {
         touch();
         loadGoalSnapshot(sid);
+      },
+
+      "swarm.started": (d) => {
+        touch();
+        const status = buildSwarmStatusFromStarted(d);
+        if (!status) return;
+        act().upsertSwarmStatus(status);
+        scrollToBottom();
+      },
+
+      "swarm.event": (d) => {
+        touch();
+        if (act().status !== "streaming") act().setStatus("streaming");
+        const runId = String(d.run_id || "");
+        const event = d.event;
+        if (!runId || !event) return;
+        act().updateSwarmStatus(runId, (current) => applySwarmEvent(current, event));
+        scrollToBottom();
       },
 
       "goal.evidence": () => {
@@ -735,6 +765,13 @@ export function Agent() {
   /* Safety timeout: if streaming but no SSE event for sseTimeoutMsRef.current ms, reset to idle */
   useEffect(() => {
     if (status !== "streaming") return;
+    // Arm the clock at the start of every streaming turn. Without this, a turn
+    // whose very first event never arrives (e.g. the LLM provider hangs before
+    // emitting a single token) left lastEventRef at its 0 / stale value, so the
+    // guard below short-circuited and the UI hung on "Agent is working…"
+    // forever. touch() refreshes this on every real event; the no-op heartbeat
+    // deliberately does not, so a connection that only keep-alives still trips.
+    lastEventRef.current = Date.now();
     const timer = setInterval(() => {
       if (lastEventRef.current && Date.now() - lastEventRef.current > sseTimeoutMsRef.current && act().status === "streaming") {
         act().setStatus("idle");
@@ -798,10 +835,11 @@ export function Agent() {
       }
       setupSSE(sid);
       await api.sendMessage(sid, finalPrompt);
-    } catch {
+    } catch (error) {
       act().setStatus("error");
-      toast.error("Failed to send message, please retry.");
-      act().addMessage({ id: "", type: "error", content: "Failed to send message, please retry.", timestamp: Date.now() });
+      const message = isAuthRequiredError(error) ? AUTH_REQUIRED_MESSAGE : "Failed to send message, please retry.";
+      toast.error(message);
+      act().addMessage({ id: "", type: "error", content: message, timestamp: Date.now() });
     }
   };
 
@@ -907,10 +945,11 @@ export function Agent() {
     try {
       setupSSE(sessionId);
       await api.sendMessage(sessionId, prompt);
-    } catch {
+    } catch (error) {
       act().setStatus("error");
-      toast.error("Failed to continue goal, please retry.");
-      act().addMessage({ id: "", type: "error", content: "Failed to continue goal, please retry.", timestamp: Date.now() });
+      const message = isAuthRequiredError(error) ? AUTH_REQUIRED_MESSAGE : "Failed to continue goal, please retry.";
+      toast.error(message);
+      act().addMessage({ id: "", type: "error", content: message, timestamp: Date.now() });
     }
   }, [forceScrollToBottom, goalSnapshot, sessionId, setupSSE, status]);
 
@@ -944,6 +983,8 @@ export function Agent() {
         lines.push(`## Error (${time})`, ``, msg.content, ``);
       } else if (msg.type === "tool_call") {
         lines.push(`> Tool call: ${msg.tool || "unknown"}`, ``);
+      } else if (msg.type === "swarm_status") {
+        lines.push(`> Swarm status: ${msg.swarmStatus?.preset || "swarm"} ${msg.swarmStatus?.status || ""}`, ``);
       } else if (msg.type === "run_complete") {
         lines.push(`> Backtest complete: ${msg.runId || ""}`, ``);
       }
@@ -1084,6 +1125,13 @@ export function Agent() {
               );
             }
             const msgIdx = messages.indexOf(g.msg);
+            if (g.msg.type === "swarm_status" && g.msg.swarmStatus) {
+              return (
+                <div key={row.key} data-msg-idx={msgIdx}>
+                  <SwarmStatusCard status={g.msg.swarmStatus} />
+                </div>
+              );
+            }
             return (
               <div key={row.key} data-msg-idx={msgIdx}>
                 <MessageBubble msg={g.msg} onRetry={g.msg.type === "error" ? handleRetry : undefined} />
@@ -1092,7 +1140,7 @@ export function Agent() {
           })}
 
           {/* Pre-stream placeholder: visible after Send, before first SSE event */}
-          {status === "streaming" && !streamingText && toolCalls.length === 0 && (
+          {status === "streaming" && !streamingText && toolCalls.length === 0 && !messages.some((m) => m.type === "swarm_status" && m.swarmStatus?.status === "running") && (
             <div className="flex gap-3">
               <AgentAvatar />
               <div className="flex-1 min-w-0 flex items-center gap-2 text-xs text-muted-foreground pt-1">

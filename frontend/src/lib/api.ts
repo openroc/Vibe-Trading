@@ -157,6 +157,13 @@ export const api = {
     }),
   alphaBenchStreamUrl: (jobId: string) =>
     withAuthQuery(`${BASE}/alpha/bench/${encodeURIComponent(jobId)}/stream`),
+  createAlphaCompare: (body: AlphaCompareRequest) =>
+    request<{ status: string; job_id: string }>("/alpha/compare", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  alphaCompareStreamUrl: (jobId: string) =>
+    withAuthQuery(`${BASE}/alpha/compare/${encodeURIComponent(jobId)}/stream`),
 
   // Connector runtime channel — privileged surface actions (NOT agent tools).
   // commit is the ONLY action that writes a mandate; halt trips the kill switch.
@@ -677,6 +684,43 @@ export interface AlphaBenchResult {
   top5_by_ir: AlphaBenchTopRow[];
   dead_examples: AlphaBenchTopRow[];
   by_theme: Record<string, { alive: number; reversed: number; dead: number }>;
+}
+
+export interface AlphaCompareRequest {
+  alpha_ids: string[];
+  universe: string;
+  period: string;
+  /** One of: ir | ic_mean | ic_positive_ratio | ic_count (default ir). */
+  sort?: string;
+}
+
+export interface AlphaCompareRow {
+  rank: number;
+  id: string;
+  zoo: string;
+  ic_mean: number;
+  ic_std: number;
+  ir: number;
+  ic_positive_ratio: number;
+  ic_count: number;
+  /** `delta_<sort>_vs_best` — gap to the top-ranked alpha on the active metric. */
+  [deltaKey: string]: number | string;
+}
+
+export interface AlphaCompareSkip {
+  id: string;
+  reason: string;
+}
+
+export interface AlphaCompareResult {
+  universe: string;
+  period: string;
+  sort: string;
+  n_compared: number;
+  n_skipped: number;
+  winner: string;
+  ranking: AlphaCompareRow[];
+  skipped: AlphaCompareSkip[];
 }
 
 // --- Connector runtime channel types ---
