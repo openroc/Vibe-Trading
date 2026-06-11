@@ -16,11 +16,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-<<<<<<< HEAD
 _SYSTEM_PROMPT = """You are a finance research agent with {skill_count} specialist skills, {tool_count} tools, 7 data sources (with auto-fallback), and 29 multi-agent swarm teams.
-=======
-_SYSTEM_PROMPT = """You are a finance research agent with {skill_count} specialist skills, {tool_count} tools, 8 data sources (with auto-fallback), and 29 multi-agent swarm teams.
->>>>>>> feat(loaders): register TDX loader, wire into A-share fallback chain, update docs
 You handle backtesting, factor analysis, options pricing, risk audits, research reports, document/web reading, web search, and team-based workflows.
 
 ## Tools

@@ -64,16 +64,6 @@ def _ensure_registered() -> None:
     _registered = True
 
     _loader_modules = [
-<<<<<<< HEAD
-        "backtest.loaders.tushare",
-        "backtest.loaders.internal_loader",
-        "backtest.loaders.okx",
-        "backtest.loaders.yfinance_loader",
-        "backtest.loaders.akshare_loader",
-        "backtest.loaders.mootdx_loader",
-        "backtest.loaders.ccxt_loader",
-        "backtest.loaders.futu",
-=======
         "agent.backtest.loaders.tushare",
         "agent.backtest.loaders.internal_loader",
         "agent.backtest.loaders.okx",
@@ -82,7 +72,7 @@ def _ensure_registered() -> None:
         "agent.backtest.loaders.ccxt_loader",
         "agent.backtest.loaders.futu",
         "agent.backtest.loaders.tdx_loader",
->>>>>>> feat(loaders): register TDX loader, wire into A-share fallback chain, update docs
+        "agent.backtest.loaders.mootdx_loader",
     ]
     import importlib
     for mod in _loader_modules:
@@ -97,15 +87,7 @@ def _ensure_registered() -> None:
 # ---------------------------------------------------------------------------
 
 FALLBACK_CHAINS: dict[str, list[str]] = {
-<<<<<<< HEAD
-<<<<<<< HEAD
-    "a_share":   ["tushare", "mootdx", "akshare"],
-=======
-    "a_share":   ["tushare", "internal", "akshare"],
->>>>>>> feat(loader): add internal network A-share loader
-=======
-    "a_share":   ["tdx", "tushare", "internal", "akshare"],
->>>>>>> feat(loaders): register TDX loader, wire into A-share fallback chain, update docs
+    "a_share":   ["tdx", "mootdx", "internal", "tushare", "akshare"],
     "us_equity": ["yfinance", "akshare"],
     "hk_equity": ["yfinance", "futu", "akshare"],
     "crypto":    ["okx", "ccxt", "yfinance"],
